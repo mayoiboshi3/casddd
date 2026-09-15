@@ -146,7 +146,7 @@ include "includes/layout.php";
                 <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Live Intelligence Feed
             </div>
             <h2 class="text-4xl font-black text-slate-900 tracking-tighter leading-none">
-                Statistical SUPER SHY super owhhhh <span class="text-emerald-600">Analytics</span>
+                Statistical SUPER SHY super owhhhjhjhh <span class="text-emerald-600">Analytics</span>
             </h2>
             <p class="text-slate-400 font-bold text-xs mt-2 uppercase tracking-tight">Centralized Diagnostic & Trend Analytics</p>
         </div>
