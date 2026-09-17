@@ -391,11 +391,13 @@ function render_planting_harvesting_section($conn) {
     }
     ?>
 
-    <!-- ═══ PLANTING & HARVESTING REPORTS ═══ -->
+    <!-- ═══ PLANTING & HARVESTING REPORTS ═══
+         Shown directly on the page (no "View Reports" click required) — the
+         farm activity list, tabs, search and filters all render inline as
+         soon as the page loads. -->
     <div id="ph-section" class="mt-10">
-
-        <button onclick="openPHAllReportsModal()" type="button"
-                class="w-full bg-white p-8 rounded-[2rem] border border-gray-200/80 shadow-sm text-left transition hover:shadow-md hover:border-gray-300 cursor-pointer flex items-center justify-between gap-6 flex-wrap">
+    <div class="bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl">
+        <div class="flex items-center justify-between gap-4 mb-6 flex-wrap">
             <div class="flex items-center gap-4">
                 <div class="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0">
                     <svg class="w-6 h-6 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
@@ -410,12 +412,35 @@ function render_planting_harvesting_section($conn) {
                     <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Planting, harvesting, and crop damage reports from farmers and staff</p>
                 </div>
             </div>
-            <div class="flex items-center gap-3 shrink-0">
-                <span id="phReportsCountBtn" class="btn-intel bg-gray-900 text-white px-5 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest">
-                    View Reports (<?= (int)$ph_stats['total'] ?>)
-                </span>
+            <button onclick="openPHAddModal()" type="button" class="btn-intel bg-gray-900 text-white px-5 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest shrink-0">
+                + Add Report
+            </button>
+        </div>
+
+        <div id="phTypeTabsWrap">
+            <div class="ph-tabs" id="phTypeTabs"></div>
+        </div>
+
+        <div class="pt-5 flex items-center gap-2.5 flex-wrap">
+            <div class="relative flex-1 min-w-[180px]">
+                <svg class="w-4 h-4 text-gray-350 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg>
+                <input type="text" id="phSearchInput" placeholder="Search by farmer, report number, or crop..."
+                       class="w-full pl-9 pr-3 py-2.5 text-xs font-medium rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-300"
+                       oninput="renderPHRows()">
             </div>
-        </button>
+            <input type="date" id="phDateInput"
+                   class="px-3 py-2.5 text-xs font-medium rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-300"
+                   onchange="renderPHRows()">
+            <button type="button" id="phClearFiltersBtn" onclick="clearPHFilters()"
+                    class="hidden text-[10px] font-bold uppercase tracking-widest text-gray-400 hover:text-gray-700 px-2">
+                Clear
+            </button>
+        </div>
+
+        <div class="pt-3 pb-1 flex items-center gap-2 flex-wrap" id="phFilterChips"></div>
+
+        <div id="phAllReportsBody" class="divide-y divide-gray-100 mt-2"></div>
+    </div>
     </div>
 
     <!-- ═══ SAVE SUCCESS MODAL ═══ -->
@@ -653,60 +678,6 @@ function render_planting_harvesting_section($conn) {
                         Save Report
                     </button>
                 </form>
-            </div>
-        </div>
-    </div>
-
-    <!-- ═══ PLANTING & HARVESTING POP-UP (every report, any status) ═══ -->
-    <div id="phAllReportsModal" class="hidden fixed inset-0 bg-black/60 z-50 items-center justify-center p-4">
-        <div class="modal-container bg-white w-full max-w-2xl">
-            <div class="p-6 border-b border-gray-100 flex items-center justify-between gap-4">
-                <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0">
-                        <svg class="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-                            <rect x="8" y="2" width="8" height="4" rx="1"></rect>
-                            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
-                            <path d="M9 12h6"></path>
-                            <path d="M9 16h6"></path>
-                        </svg>
-                    </div>
-                    <div>
-                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Farm Activity</p>
-                        <h3 class="text-lg font-bold text-gray-900 tracking-tight">All Farm Reports</h3>
-                    </div>
-                </div>
-                <div class="flex items-center gap-2">
-                    <button onclick="closePHModal('phAllReportsModal'); openPHAddModal()" class="btn-intel bg-gray-900 text-white px-4 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest shrink-0">
-                        + Add Report
-                    </button>
-                    <button onclick="closePHModal('phAllReportsModal')" class="text-gray-400 hover:text-gray-700 text-xl leading-none w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-50">&times;</button>
-                </div>
-            </div>
-
-            <div class="px-6 pt-4" id="phTypeTabsWrap">
-                <div class="ph-tabs" id="phTypeTabs"></div>
-            </div>
-
-            <div class="px-6 pt-5 flex items-center gap-2.5 flex-wrap">
-                <div class="relative flex-1 min-w-[180px]">
-                    <svg class="w-4 h-4 text-gray-350 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg>
-                    <input type="text" id="phSearchInput" placeholder="Search by farmer, report number, or crop..."
-                           class="w-full pl-9 pr-3 py-2.5 text-xs font-medium rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-300"
-                           oninput="renderPHRows()">
-                </div>
-                <input type="date" id="phDateInput"
-                       class="px-3 py-2.5 text-xs font-medium rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-300"
-                       onchange="renderPHRows()">
-                <button type="button" id="phClearFiltersBtn" onclick="clearPHFilters()"
-                        class="hidden text-[10px] font-bold uppercase tracking-widest text-gray-400 hover:text-gray-700 px-2">
-                    Clear
-                </button>
-            </div>
-
-            <div class="px-6 pt-3 pb-1 flex items-center gap-2 flex-wrap" id="phFilterChips"></div>
-
-            <div class="modal-scroll-area">
-                <div id="phAllReportsBody" class="divide-y divide-gray-100"></div>
             </div>
         </div>
     </div>
@@ -1187,14 +1158,15 @@ function render_planting_harvesting_section($conn) {
                 <span class="sev-badge shrink-0 ${badgeClass}">${statusLabel}</span>
             `;
             row.onclick = () => {
-                closePHModal('phAllReportsModal');
                 openPHViewModal(rep);
             };
             body.appendChild(row);
         });
     }
 
-    function openPHAllReportsModal() {
+    // Builds and renders the farm activity list right away — no button click
+    // needed to see it, it's live on the page as soon as it loads.
+    function initPHReportsList() {
         phCurrentFilter = 'all';
         phCurrentTypeTab = 'all';
         const searchEl = document.getElementById('phSearchInput');
@@ -1204,9 +1176,6 @@ function render_planting_harvesting_section($conn) {
         buildPHTypeTabs();
         buildPHFilterChips();
         renderPHRows();
-
-        document.getElementById('phAllReportsModal').classList.remove('hidden');
-        document.getElementById('phAllReportsModal').classList.add('flex');
     }
 
     function closePHModal(id) {
@@ -1397,14 +1366,13 @@ function render_planting_harvesting_section($conn) {
     }
 
     // Removes a report from the in-memory list + re-renders everything that
-    // depends on it (filter chips, the table, and the reports counter).
+    // depends on it (filter chips and the table).
     function phRemoveReportLocally(reportId) {
         const idx = phFindReportIndex(reportId);
         if (idx !== -1) phAllReports.splice(idx, 1);
         buildPHTypeTabs();
         buildPHFilterChips();
         renderPHRows();
-        phUpdateReportsCounter();
     }
 
     // Applies a status change (e.g. Verified) to the in-memory list without
@@ -1417,15 +1385,11 @@ function render_planting_harvesting_section($conn) {
         }
         buildPHFilterChips();
         renderPHRows();
-        phUpdateReportsCounter();
-    }
-
-    function phUpdateReportsCounter() {
-        const el = document.getElementById('phReportsCountBtn');
-        if (el) el.textContent = 'View Reports (' + phAllReports.length + ')';
     }
 
     document.addEventListener('DOMContentLoaded', () => {
+        initPHReportsList();
+
         const phAddForm = document.getElementById('phAddForm');
         if (phAddForm) {
             phAddForm.addEventListener('submit', function (e) {

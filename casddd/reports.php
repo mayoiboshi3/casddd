@@ -90,11 +90,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
         // is verified / resolved / rejected together, as one unit.
         $updateQuery = "UPDATE disease_cases SET status = '$new_status', remarks = '$remarks', updated_at = NOW() $severitySql WHERE reference_id = '$ref_esc'";
         if(mysqli_query($conn, $updateQuery)) {
-            echo "<script>alert('Intelligence Update Saved!'); window.location='reports.php?tab=" . $new_status . "';</script>";
+            echo "<script>alert('Intelligence Update Saved!'); window.location='reports.php?view=disease&tab=" . $new_status . "';</script>";
             exit;
         }
     } else {
-        echo "<script>alert('Invalid status change — cases can only move forward: Pending → Verified → Resolved.'); window.location='reports.php?tab=" . ($cur_status ?? 'pending') . "';</script>";
+        echo "<script>alert('Invalid status change — cases can only move forward: Pending → Verified → Resolved.'); window.location='reports.php?view=disease&tab=" . ($cur_status ?? 'pending') . "';</script>";
         exit;
     }
 }
@@ -170,10 +170,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['reassign_disease'])) {
             }
         }
 
-        echo "<script>window.location='reports.php?tab=pending&case_id=" . $case_id . "';</script>";
+        echo "<script>window.location='reports.php?view=disease&tab=pending&case_id=" . $case_id . "';</script>";
         exit;
     } else {
-        echo "<script>alert('This can only be done for Pending, Other / Unidentified reports.'); window.location='reports.php?tab=pending&case_id=" . $case_id . "';</script>";
+        echo "<script>alert('This can only be done for Pending, Other / Unidentified reports.'); window.location='reports.php?view=disease&tab=pending&case_id=" . $case_id . "';</script>";
         exit;
     }
 }
@@ -244,7 +244,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
             }
         }
         mysqli_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$rec_text')");
-        echo "<script>window.location='reports.php?tab=" . $tab_return . "&case_id=" . $case_id . "&open_msg=1';</script>";
+        echo "<script>window.location='reports.php?view=disease&tab=" . $tab_return . "&case_id=" . $case_id . "&open_msg=1';</script>";
         exit;
     }
 }
@@ -381,9 +381,23 @@ $stats_query = mysqli_query($conn, "SELECT COUNT(*) as total,
 $stats     = mysqli_fetch_assoc($stats_query);
 $activeTab = $_GET['tab'] ?? 'pending';
 
+// ── TOP-LEVEL REPORT VIEW: Disease Reports vs Planting & Harvesting Reports ──
+// These are two different kinds of farmer-submitted reports. They used to live
+// on one continuous page — the disease case table first, with the planting &
+// harvesting section buried below it — which made the page feel like a wall of
+// mixed reports. Now they're two separate screens, switched at the very top of
+// the page, so only one report type (and its own stats/actions) is ever on
+// screen at once.
+$view = $_GET['view'] ?? 'disease';
+if (!in_array($view, ['disease', 'farm'], true)) { $view = 'disease'; }
+
 // FROM DASHBOARD MAP
 $autoOpenCaseId   = isset($_GET['case_id'])     ? (int)$_GET['case_id']     : 0;
 $filterBarangayId = isset($_GET['barangay_id']) ? (int)$_GET['barangay_id'] : 0;
+
+// A deep link from the dashboard map always points at a specific disease case,
+// so always land on the Disease Reports view for it regardless of ?view=.
+if ($autoOpenCaseId || $filterBarangayId) { $view = 'disease'; }
 
 // ── TAB FILTERS: date range + barangay dropdown (applies within each tab) ──
 $filterDateFrom = trim($_GET['date_from'] ?? '');
@@ -445,6 +459,10 @@ if ($autoOpenCaseId) {
 // Date constraints used by the new case report form
 $today   = date('Y-m-d');
 $minDate = date('Y-m-d', strtotime('-130 days'));
+
+// Collected for bulk PDF export of the active tab — only populated when the
+// Disease Reports view actually builds its table below.
+$tableRows = [];
 ?>
 
 <style>
@@ -611,16 +629,33 @@ $minDate = date('Y-m-d', strtotime('-130 days'));
        rendered by render_review_modal(). */
 </style>
 
+<!-- ═══ REPORT TYPE SWITCHER ═══
+     Always visible at the top, regardless of which view is active. This is the
+     single place a user picks which kind of report they want to see or file —
+     Disease Reports and Farm (Planting & Harvesting) Reports never mix on the
+     same screen anymore. -->
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
+    <a href="?view=disease" class="btn-intel flex items-center gap-4 p-6 rounded-[1.75rem] border-2 <?= $view === 'disease' ? 'bg-emerald-600 border-emerald-600 shadow-lg' : 'bg-white border-gray-100 hover:border-emerald-200' ?>">
+        <div class="w-12 h-12 flex-shrink-0 rounded-2xl flex items-center justify-center text-2xl <?= $view === 'disease' ? 'bg-white/15' : 'bg-emerald-50' ?>">🌽</div>
+        <div class="text-left">
+            <p class="font-black text-sm uppercase tracking-wide <?= $view === 'disease' ? 'text-white' : 'text-gray-800' ?>">Disease Reports</p>
+            <p class="text-[11px] font-bold <?= $view === 'disease' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$stats['total'] ?> total &middot; <?= (int)$stats['pending'] ?> awaiting review</p>
+        </div>
+    </a>
+    <a href="?view=farm" class="btn-intel flex items-center gap-4 p-6 rounded-[1.75rem] border-2 <?= $view === 'farm' ? 'bg-emerald-600 border-emerald-600 shadow-lg' : 'bg-white border-gray-100 hover:border-emerald-200' ?>">
+        <div class="w-12 h-12 flex-shrink-0 rounded-2xl flex items-center justify-center text-2xl <?= $view === 'farm' ? 'bg-white/15' : 'bg-emerald-50' ?>">🌱</div>
+        <div class="text-left">
+            <p class="font-black text-sm uppercase tracking-wide <?= $view === 'farm' ? 'text-white' : 'text-gray-800' ?>">Farm Reports</p>
+            <p class="text-[11px] font-bold <?= $view === 'farm' ? 'text-white/80' : 'text-gray-400' ?>">Farmer planting &amp; harvest activity</p>
+        </div>
+    </a>
+</div>
+
+<?php if ($view === 'disease'): ?>
+
 <!-- ═══ PAGE HEADER ═══ -->
 <div class="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-10">
     <div>
-        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600 text-[10px] font-black uppercase tracking-widest mb-3">
-            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Monitoring Active
-        </div>
-        <h2 class="text-4xl font-black text-slate-900 tracking-tighter leading-none">
-            Disease <span class="text-emerald-600">Report</span>
-        </h2>
-        <p class="text-slate-400 font-bold text-xs mt-2 uppercase tracking-tight"> </p>
         <?php if ($filterBarangayId): ?>
         <div class="inline-flex items-center gap-2 mt-3 px-4 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 text-[11px] font-black uppercase tracking-wide">
             <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/></svg>
@@ -889,7 +924,7 @@ $minDate = date('Y-m-d', strtotime('-130 days'));
                         <span class="text-[11px] font-black text-gray-700 uppercase"><?= htmlspecialchars($row['brgy_name'] ?? '— Unassigned —') ?></span>
                     </td>
                     <td class="px-4 py-5 text-center">
-                        <button onclick='openViewModal(<?= htmlspecialchars(json_encode($modal_row), ENT_QUOTES, 'UTF-8') ?>)' class="btn-intel bg-gray-900 text-white px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest">View Report</button>
+                        <button onclick='openViewModal(<?= htmlspecialchars(json_encode($modal_row), ENT_QUOTES, 'UTF-8') ?>)' class="btn-intel bg-gray-900 text-white px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest">View Only</button>
                     </td>
                 </tr>
                 <?php endforeach; else: ?>
@@ -900,7 +935,11 @@ $minDate = date('Y-m-d', strtotime('-130 days'));
     </div>
 </div>
 
+<?php endif; // end $view === 'disease' ?>
+
+<?php if ($view === 'farm'): ?>
 <?php render_planting_harvesting_section($conn); ?>
+<?php endif; // end $view === 'farm' ?>
 
 <?php
 $allDiseasesForPicker = [];
