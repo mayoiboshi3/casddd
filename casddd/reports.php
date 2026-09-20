@@ -470,9 +470,6 @@ $tableRows = [];
     .modal-scroll-area { overflow-y: auto; flex-grow: 1; padding: 2rem; scrollbar-width: thin; }
     .farmer-avatar { width: 45px; height: 45px; border-radius: 12px; object-fit: cover; border: 2px solid white; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
 
-    .stats-card { transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
-    .stats-card:hover { transform: translateY(-10px) scale(1.02); box-shadow: 0 25px 30px -10px rgba(0,0,0,0.1); }
-
     .report-row { transition: all 0.3s ease; position: relative; }
     .report-row:hover { background-color: #f8fafc; transform: translateX(5px); }
     .report-row::after { content:''; position:absolute; left:0; top:0; height:100%; width:0; background:#10b981; transition:width 0.3s ease; border-radius:4px; }
@@ -565,6 +562,78 @@ $tableRows = [];
     }
     @keyframes pop { 0%{transform:scale(.95)} 100%{transform:scale(1)} }
 
+    /* ── AJAX tab/filter switching for the Disease Reports panel: no full
+       page reload when hopping between Pending / Verified / Resolved. ── */
+    #drPanel { transition: opacity .15s ease; }
+    #drPanel.dr-panel-loading { opacity: .45; pointer-events: none; }
+
+    /* ── Farm-Reports-style browser tabs, reused here so Disease Reports and
+       Farm Reports share the same tab look ── */
+    .dr-tabs-wrap { border-bottom: 1.5px solid #e5e7eb; }
+    .dr-tabs {
+        display: flex;
+        align-items: flex-end;
+        gap: 3px;
+        padding: 0 4px;
+        overflow-x: auto;
+    }
+    .dr-tab {
+        position: relative;
+        top: 1.5px;
+        padding: 9px 16px 8px;
+        font-size: 10.5px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #9ca3af;
+        background: #f3f4f6;
+        border: 1.5px solid #e5e7eb;
+        border-bottom: none;
+        border-radius: 10px 10px 0 0;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: all .15s ease;
+        text-decoration: none;
+        display: inline-block;
+    }
+    .dr-tab:hover { color: #374151; background: #e9eaec; }
+    .dr-tab-active {
+        top: 0;
+        color: #111827;
+        background: #fff;
+        z-index: 1;
+    }
+    .dr-tab-count { margin-left: 3px; font-weight: 800; color: #c2c6cc; }
+    .dr-tab-active .dr-tab-count { color: #9ca3af; }
+
+    /* ── Farm-Reports-style row list, reused here so Disease Reports and
+       Farm Reports share the same row look ── */
+    .dr-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 16px 24px;
+        cursor: pointer;
+        transition: background .15s ease;
+    }
+    .dr-row:hover { background: #fafafa; }
+    .dr-type-chip {
+        font-size: 9px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #d1fae5;
+        color: #065f46;
+    }
+    .dr-empty {
+        text-align: center;
+        padding: 56px 24px;
+        color: #9ca3af;
+    }
+
     /* ── Smooth hover feedback for filter inputs and action buttons ── */
     .filter-input {
         transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
@@ -653,60 +722,54 @@ $tableRows = [];
 
 <?php if ($view === 'disease'): ?>
 
-<!-- ═══ PAGE HEADER ═══ -->
-<div class="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-10">
-    <div>
-        <?php if ($filterBarangayId): ?>
-        <div class="inline-flex items-center gap-2 mt-3 px-4 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 text-[11px] font-black uppercase tracking-wide">
-            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/></svg>
-            Filtered by Barangay
-            <?php $bn_q = mysqli_query($conn,"SELECT name FROM barangays WHERE id=$filterBarangayId LIMIT 1"); if($bn_q && $bn_r = mysqli_fetch_assoc($bn_q)) echo htmlspecialchars($bn_r['name']); ?>
-            &nbsp;&mdash;&nbsp;<a href="reports.php" class="underline hover:text-amber-900">Clear filter</a>
-        </div>
-        <?php endif; ?>
-    </div>
-    <div class="flex gap-3">
-        <a href="dashboard.php" class="btn-intel bg-emerald-50 border border-emerald-200 text-emerald-700 px-6 py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-sm flex items-center gap-2">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
-            Back to Map
-        </a>
-        <button onclick="openCreateModal()" class="btn-intel bg-gray-900 text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg">
-            + New Report
-        </button>
+<?php if ($filterBarangayId): ?>
+<div class="mb-6">
+    <div class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 text-[11px] font-black uppercase tracking-wide">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/></svg>
+        Filtered by Barangay
+        <?php $bn_q = mysqli_query($conn,"SELECT name FROM barangays WHERE id=$filterBarangayId LIMIT 1"); if($bn_q && $bn_r = mysqli_fetch_assoc($bn_q)) echo htmlspecialchars($bn_r['name']); ?>
+        &nbsp;&mdash;&nbsp;<a href="reports.php" class="underline hover:text-amber-900">Clear filter</a>
     </div>
 </div>
+<?php endif; ?>
 
 <?php render_new_case_report_modal($conn, $today, $minDate); ?>
 
-<!-- ═══ STAT CARDS ═══ -->
-<div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-10">
-    <?php 
-    $cards = [
-        ['Total Reports',        $stats['total'],    'bg-white',       'text-gray-800'],
-        ['Pending Verification', $stats['pending'],  'bg-amber-500',   'text-white'],
-        ['Verified Cases',       $stats['verified'], 'bg-blue-600',    'text-white'],
-        ['Resolved / Treated',   $stats['resolved'], 'bg-emerald-600', 'text-white']
-    ];
-    foreach($cards as $c): ?>
-    <div class="stats-card <?= $c[2] ?> p-7 rounded-[2rem] border border-black/5 shadow-sm">
-        <p class="text-[9px] font-black uppercase tracking-widest <?= str_contains($c[2],'white') ? 'text-gray-400' : 'text-white/70' ?>"><?= $c[0] ?></p>
-        <h4 class="text-4xl font-black mt-1 <?= $c[3] ?>"><?= $c[1] ?></h4>
-    </div>
-    <?php endforeach; ?>
-</div>
-
-<!-- ═══ CASE FILE TABLE ═══ -->
+<!-- ═══ CASE FILE LIST ═══ -->
 <div class="bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl">
-    <div class="flex items-center justify-between mb-6 flex-wrap gap-4">
-        <h3 class="text-xl font-black text-gray-800 tracking-tight">Farmer Reports</h3>
+    <div class="flex items-center justify-between gap-4 mb-6 flex-wrap">
+        <div class="flex items-center gap-4">
+            <div class="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0 text-2xl">🌽</div>
+            <div>
+                <h3 class="text-lg font-bold text-gray-900 tracking-tight">Farmer Reports</h3>
+                <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Corn disease cases reported by farmers</p>
+            </div>
+        </div>
+        <div class="flex gap-3 shrink-0">
+            <a href="dashboard.php" class="btn-intel bg-emerald-50 border border-emerald-200 text-emerald-700 px-5 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+                Back to Map
+            </a>
+            <button onclick="openCreateModal()" type="button" class="btn-intel bg-gray-900 text-white px-5 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest shrink-0">
+                + New Report
+            </button>
+        </div>
+    </div>
 
-        <!-- ── Tabs: always anchored top-right, never shifts between tabs ── -->
-        <div class="flex bg-gray-100 p-1.5 rounded-2xl gap-1">
+    <!-- ── AJAX panel: tabs + filters + case list. Swapped in place via JS
+         (see bottom of file) instead of a full page navigation, so switching
+         between Pending / Verified / Resolved doesn't reload the page. ── -->
+    <div id="drPanel">
+
+    <!-- ── Tabs: same browser-tab look as the Farm Reports section ── -->
+    <div class="dr-tabs-wrap">
+        <div class="dr-tabs">
             <?php
             $tabConfig = [
-                'pending'  => ['label' => 'Pending',  'active' => 'active-pending'],
-                'verified' => ['label' => 'Verified', 'active' => 'active-verified'],
-                'resolved' => ['label' => 'Resolved', 'active' => 'active-resolved'],
+                'all'      => ['label' => 'All',      'count' => (int)$stats['total']],
+                'pending'  => ['label' => 'Pending',  'count' => (int)$stats['pending']],
+                'verified' => ['label' => 'Verified', 'count' => (int)$stats['verified']],
+                'resolved' => ['label' => 'Resolved', 'count' => (int)$stats['resolved']],
             ];
             $tabQueryExtra = '';
             if ($filterBarangayId) $tabQueryExtra .= '&brgy_filter=' . $filterBarangayId;
@@ -715,224 +778,266 @@ $tableRows = [];
 
             foreach ($tabConfig as $tab => $cfg): 
                 $isActive   = ($activeTab === $tab);
-                $activeClass = $isActive ? ('tab-pill ' . $cfg['active']) : 'tab-pill inactive';
+                $activeClass = $isActive ? 'dr-tab dr-tab-active' : 'dr-tab';
             ?>
                 <a href="?tab=<?= $tab ?><?= $tabQueryExtra ?>" class="<?= $activeClass ?>">
-                    <?= $cfg['label'] ?>
+                    <?= $cfg['label'] ?> <span class="dr-tab-count"><?= $cfg['count'] ?></span>
                 </a>
             <?php endforeach; ?>
         </div>
     </div>
 
-    <!-- ── Second row: filters (left) + export (right), always its own row so it never pushes the tabs ── -->
-    <div class="flex items-center justify-between mb-8 flex-wrap gap-4">
-        <form method="get" class="flex items-center gap-2 flex-wrap">
-            <input type="hidden" name="tab" value="<?= htmlspecialchars($activeTab) ?>">
+    <!-- ── Search + filters, all in one row: search is instant/client-side
+         (same behavior as the Farm Reports search bar), the barangay/date
+         fields alongside it still submit server-side since each tab only
+         loads its own page of reports. Export sits at the row's far end. ── -->
+    <div class="pt-5 flex items-center justify-between flex-wrap gap-4">
+        <div class="flex items-center gap-2.5 flex-wrap flex-1 min-w-0">
+            <div class="relative flex-1 min-w-[180px]">
+                <svg class="w-4 h-4 text-gray-350 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg>
+                <input type="text" id="drSearchInput" placeholder="Search by farmer, report number, or disease..."
+                       class="w-full pl-9 pr-3 py-2.5 text-xs font-medium rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-300"
+                       oninput="filterDrRows()">
+            </div>
 
-            <select name="brgy_filter" onchange="this.form.submit()"
-                class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 uppercase tracking-wide">
-                <option value="0">All Barangays</option>
-                <?php
-                if ($allBarangays_q) {
-                    mysqli_data_seek($allBarangays_q, 0);
-                    while ($b = mysqli_fetch_assoc($allBarangays_q)):
-                ?>
-                    <option value="<?= (int)$b['id'] ?>" <?= ($filterBarangayId == $b['id']) ? 'selected' : '' ?>>
-                        <?= htmlspecialchars($b['name']) ?>
-                    </option>
-                <?php endwhile; } ?>
-            </select>
+            <form method="get" class="flex items-center gap-2 flex-wrap">
+                <input type="hidden" name="tab" value="<?= htmlspecialchars($activeTab) ?>">
 
-            <input type="date" name="date_from" value="<?= htmlspecialchars($filterDateFrom) ?>"
-                class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5">
-            <span class="text-[10px] font-black text-gray-300 uppercase">to</span>
-            <input type="date" name="date_to" value="<?= htmlspecialchars($filterDateTo) ?>"
-                class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5">
+                <select name="brgy_filter" onchange="drSubmitFilterForm(this.form)"
+                    class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 uppercase tracking-wide">
+                    <option value="0">All Barangays</option>
+                    <?php
+                    if ($allBarangays_q) {
+                        mysqli_data_seek($allBarangays_q, 0);
+                        while ($b = mysqli_fetch_assoc($allBarangays_q)):
+                    ?>
+                        <option value="<?= (int)$b['id'] ?>" <?= ($filterBarangayId == $b['id']) ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($b['name']) ?>
+                        </option>
+                    <?php endwhile; } ?>
+                </select>
 
-            <button type="submit"
-                class="btn-intel bg-gray-900 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest">
-                Filter
-            </button>
-            <?php if ($filterBarangayId || $filterDateFrom || $filterDateTo): ?>
-            <a href="?tab=<?= htmlspecialchars($activeTab) ?>"
-                class="text-[10px] font-black text-gray-400 hover:text-gray-600 uppercase underline">
-                Clear
-            </a>
-            <?php endif; ?>
-        </form>
+                <input type="date" name="date_from" value="<?= htmlspecialchars($filterDateFrom) ?>"
+                    class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5">
+                <span class="text-[10px] font-black text-gray-300 uppercase">to</span>
+                <input type="date" name="date_to" value="<?= htmlspecialchars($filterDateTo) ?>"
+                    class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5">
+
+                <button type="submit"
+                    class="btn-intel bg-gray-900 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest">
+                    Filter
+                </button>
+                <?php if ($filterBarangayId || $filterDateFrom || $filterDateTo): ?>
+                <a href="?tab=<?= htmlspecialchars($activeTab) ?>"
+                    class="text-[10px] font-black text-gray-400 hover:text-gray-600 uppercase underline">
+                    Clear
+                </a>
+                <?php endif; ?>
+            </form>
+        </div>
 
         <?php if ($activeTab === 'verified' || $activeTab === 'resolved'): ?>
         <button id="exportTabBtn" onclick="exportAllReports()"
-            class="btn-intel bg-emerald-600 text-white px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-sm flex items-center gap-2">
+            class="btn-intel bg-emerald-600 text-white px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-sm flex items-center gap-2 shrink-0">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H8a2 2 0 01-2-2V5a2 2 0 012-2h6l6 6v11a2 2 0 01-2 2z"/></svg>
             Export <?= ucfirst($activeTab) ?> Reports (PDF)
         </button>
         <?php endif; ?>
     </div>
     
-    <div class="overflow-x-auto">
-        <table class="w-full text-left">
-            <thead>
-                <tr class="border-b border-gray-50">
-                    <th class="px-4 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">Report No.</th>
-                    <th class="px-4 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">Farmer / Barangay</th>
-                    <th class="px-4 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">Date Reported</th>
-                    <th class="px-4 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">Barangay</th>
-                    <th class="px-4 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest text-center">Action</th>
-                </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-50">
-                <?php
-                $brgy_filter = $filterBarangayId ? "AND dc.barangay_id = $filterBarangayId" : "";
+    <div class="divide-y divide-gray-50 mt-2">
+        <?php
+        $brgy_filter = $filterBarangayId ? "AND dc.barangay_id = $filterBarangayId" : "";
 
-                $date_filter = "";
-                if ($filterDateFrom !== '') {
-                    $safeFrom = mysqli_real_escape_string($conn, $filterDateFrom);
-                    $date_filter .= " AND dc.report_date >= '$safeFrom'";
+        $date_filter = "";
+        if ($filterDateFrom !== '') {
+            $safeFrom = mysqli_real_escape_string($conn, $filterDateFrom);
+            $date_filter .= " AND dc.report_date >= '$safeFrom'";
+        }
+        if ($filterDateTo !== '') {
+            $safeTo = mysqli_real_escape_string($conn, $filterDateTo);
+            $date_filter .= " AND dc.report_date <= '$safeTo 23:59:59'";
+        }
+
+        // "All" shows every status (including rejected, which otherwise has
+        // no tab of its own) — every other tab still filters to its status.
+        $safeActiveTab = mysqli_real_escape_string($conn, $activeTab);
+        $status_filter = ($activeTab === 'all') ? '' : "AND dc.status = '$safeActiveTab'";
+
+        $query = "SELECT dc.*, 
+                    b.name AS brgy_name, 
+                    d.disease_name,
+                    d.description AS disease_description,
+                    d.recommended_treatment,
+                    d.prevention_measures,
+                    f.profile_farmers AS farmer_photo
+                  FROM disease_cases dc 
+                  LEFT JOIN barangays b ON dc.barangay_id = b.id 
+                  LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
+                  LEFT JOIN farmers f   ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
+                  WHERE 1=1 $status_filter $brgy_filter $date_filter 
+                  ORDER BY dc.report_date DESC, dc.case_id ASC";
+        $result = mysqli_query($conn, $query);
+
+        // ── GROUP ROWS BY reference_id ──
+        // A report with 2-3 diseases selected is stored as several disease_cases
+        // rows sharing one reference_id. Group them here so the list (and every
+        // action below) treats that report as ONE file, not one file per disease.
+        $groups      = [];  // reference_id => ['primary' => row, 'diseases' => [...], 'case_ids' => [...]]
+        $groupOrder  = [];  // preserves first-seen order (already sorted by report_date desc)
+        if ($result) {
+            while ($row = mysqli_fetch_assoc($result)) {
+                $ref = $row['reference_id'];
+                if (!isset($groups[$ref])) {
+                    $groups[$ref] = ['primary' => $row, 'diseases' => [], 'case_ids' => []];
+                    $groupOrder[] = $ref;
                 }
-                if ($filterDateTo !== '') {
-                    $safeTo = mysqli_real_escape_string($conn, $filterDateTo);
-                    $date_filter .= " AND dc.report_date <= '$safeTo 23:59:59'";
+                // Primary row = lowest case_id in the group — the one representative
+                // row used for farmer/severity/date/photo/messaging fields.
+                if ((int)$row['case_id'] < (int)$groups[$ref]['primary']['case_id']) {
+                    $groups[$ref]['primary'] = $row;
                 }
+                $groups[$ref]['case_ids'][] = (int)$row['case_id'];
+                $groups[$ref]['diseases'][] = diseaseRowSlice($row);
+            }
+        }
 
-                $query = "SELECT dc.*, 
-                            b.name AS brgy_name, 
-                            d.disease_name,
-                            d.description AS disease_description,
-                            d.recommended_treatment,
-                            d.prevention_measures,
-                            f.profile_farmers AS farmer_photo
-                          FROM disease_cases dc 
-                          LEFT JOIN barangays b ON dc.barangay_id = b.id 
-                          LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
-                          LEFT JOIN farmers f   ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
-                          WHERE dc.status = '$activeTab' $brgy_filter $date_filter 
-                          ORDER BY dc.report_date DESC, dc.case_id ASC";
-                $result = mysqli_query($conn, $query);
+        $tableRows = []; // collected for bulk PDF export (current tab)
 
-                // ── GROUP ROWS BY reference_id ──
-                // A report with 2-3 diseases selected is stored as several disease_cases
-                // rows sharing one reference_id. Group them here so the table (and every
-                // action below) treats that report as ONE file, not one file per disease.
-                $groups      = [];  // reference_id => ['primary' => row, 'diseases' => [...], 'case_ids' => [...]]
-                $groupOrder  = [];  // preserves first-seen order (already sorted by report_date desc)
-                if ($result) {
-                    while ($row = mysqli_fetch_assoc($result)) {
-                        $ref = $row['reference_id'];
-                        if (!isset($groups[$ref])) {
-                            $groups[$ref] = ['primary' => $row, 'diseases' => [], 'case_ids' => []];
-                            $groupOrder[] = $ref;
-                        }
-                        // Primary row = lowest case_id in the group — the one representative
-                        // row used for farmer/severity/date/photo/messaging fields.
-                        if ((int)$row['case_id'] < (int)$groups[$ref]['primary']['case_id']) {
-                            $groups[$ref]['primary'] = $row;
-                        }
-                        $groups[$ref]['case_ids'][] = (int)$row['case_id'];
-                        $groups[$ref]['diseases'][] = diseaseRowSlice($row);
-                    }
-                }
+        if(count($groupOrder) > 0):
+            foreach ($groupOrder as $__ref):
+                $group    = $groups[$__ref];
+                $row      = $group['primary'];
+                $diseases = $group['diseases'];
+                $combined = combineDiseaseFields($diseases);
 
-                $tableRows = []; // collected for bulk PDF export (current tab)
+                $farmer_display = extractFarmerName($row['description']) ?? '— Unassigned —';
+                $sev_class = match($row['severity'] ?? '') {
+                    'low'      => 'sev-low',
+                    'moderate' => 'sev-moderate',
+                    'high'     => 'sev-high',
+                    'critical' => 'sev-critical',
+                    default    => 'sev-moderate'
+                };
+                // Common Rust, Northern Leaf Blight, Gray Leaf Spot and Healthy Corn
+                // track an Infection Percentage Rate instead of a severity level —
+                // only meaningful when the report is that single disease alone.
+                $isInfectionDisease = count($diseases) === 1
+                    && in_array($diseases[0]['disease_name'] ?? '', ['Common Rust', 'Northern Leaf Blight', 'Gray Leaf Spot', 'Healthy Corn'], true);
+                $modal_row = [
+                    'case_id'       => $row['case_id'],
+                    'case_ids'      => $group['case_ids'],
+                    'reference_id'  => $row['reference_id'],
+                    'report_date'   => $row['report_date'],
+                    'farmer_photo'  => $row['farmer_photo'],
+                    'growth_stage'  => $row['growth_stage'],
+                    'farmer_name'   => $farmer_display,
+                    'brgy_name'     => $row['brgy_name'] ?? '—',
+                    'description'   => stripFarmerMarker($row['description']),
+                    'status'        => $row['status'],
+                    'remarks'       => $row['remarks'],
+                    'severity'      => $row['severity'],
+                    'infection_percentage'  => $row['infection_percentage'],
+                    'photo_evidence'=> $row['photo_evidence'],
+                    'disease_name'  => $combined['name'],
+                    'disease_description' => $combined['description'],
+                    'diseases'      => $diseases,
+                    'latitude'      => $row['latitude'],
+                    'longitude'     => $row['longitude'],
+                    'gps_accuracy'  => $row['gps_accuracy'],
+                    'follow_up_date'=> $row['follow_up_date'] ?? null,
+                    'recommended_treatment'  => $combined['treatment'],
+                    'prevention_measures'    => $combined['prevention'],
+                    'recommendation_sent'    => $row['recommendation_sent']    ?? 0,
+                    'recommendation_text'    => $row['recommendation_text']    ?? null,
+                    'recommendation_sent_at' => $row['recommendation_sent_at'] ?? null,
+                    'messages'               => buildCaseMessages($conn, $row),
+                ];
+                $tableRows[] = $modal_row;
 
-                if(count($groupOrder) > 0):
-                    foreach ($groupOrder as $__ref):
-                        $group    = $groups[$__ref];
-                        $row      = $group['primary'];
-                        $diseases = $group['diseases'];
-                        $combined = combineDiseaseFields($diseases);
+                // Left-edge accent color, same idea as the Farm Reports rows
+                // (a colored strip keyed to the row's category) — here keyed
+                // to severity/infection rather than report type.
+                $rowAccent = match(true) {
+                    $isInfectionDisease => '#2dd4bf',
+                    $row['severity'] === 'low'      => '#10b981',
+                    $row['severity'] === 'moderate' => '#f59e0b',
+                    $row['severity'] === 'high'     => '#ef4444',
+                    $row['severity'] === 'critical' => '#ec4899',
+                    default => '#9ca3af',
+                };
 
-                        $farmer_display = extractFarmerName($row['description']) ?? '— Unassigned —';
-                        $sev_class = match($row['severity'] ?? '') {
-                            'low'      => 'sev-low',
-                            'moderate' => 'sev-moderate',
-                            'high'     => 'sev-high',
-                            'critical' => 'sev-critical',
-                            default    => 'sev-moderate'
-                        };
-                        // Common Rust, Northern Leaf Blight, Gray Leaf Spot and Healthy Corn
-                        // track an Infection Percentage Rate instead of a severity level —
-                        // only meaningful when the report is that single disease alone.
-                        $isInfectionDisease = count($diseases) === 1
-                            && in_array($diseases[0]['disease_name'] ?? '', ['Common Rust', 'Northern Leaf Blight', 'Gray Leaf Spot', 'Healthy Corn'], true);
-                        $modal_row = [
-                            'case_id'       => $row['case_id'],
-                            'case_ids'      => $group['case_ids'],
-                            'reference_id'  => $row['reference_id'],
-                            'report_date'   => $row['report_date'],
-                            'farmer_photo'  => $row['farmer_photo'],
-                            'growth_stage'  => $row['growth_stage'],
-                            'farmer_name'   => $farmer_display,
-                            'brgy_name'     => $row['brgy_name'] ?? '—',
-                            'description'   => stripFarmerMarker($row['description']),
-                            'status'        => $row['status'],
-                            'remarks'       => $row['remarks'],
-                            'severity'      => $row['severity'],
-                            'infection_percentage'  => $row['infection_percentage'],
-                            'photo_evidence'=> $row['photo_evidence'],
-                            'disease_name'  => $combined['name'],
-                            'disease_description' => $combined['description'],
-                            'diseases'      => $diseases,
-                            'latitude'      => $row['latitude'],
-                            'longitude'     => $row['longitude'],
-                            'gps_accuracy'  => $row['gps_accuracy'],
-                            'follow_up_date'=> $row['follow_up_date'] ?? null,
-                            'recommended_treatment'  => $combined['treatment'],
-                            'prevention_measures'    => $combined['prevention'],
-                            'recommendation_sent'    => $row['recommendation_sent']    ?? 0,
-                            'recommendation_text'    => $row['recommendation_text']    ?? null,
-                            'recommendation_sent_at' => $row['recommendation_sent_at'] ?? null,
-                            'messages'               => buildCaseMessages($conn, $row),
-                        ];
-                        $tableRows[] = $modal_row;
-                ?>
-                <tr class="report-row">
-                    <td class="px-4 py-5">
-                        <span class="text-[10px] font-black text-emerald-600 tracking-tighter"><?= htmlspecialchars($row['reference_id']) ?></span><br>
-                        <span class="font-black text-gray-800 text-sm uppercase"><?= htmlspecialchars($combined['name'] ?: '—') ?></span>
-                        <?php if ($isInfectionDisease): ?>
-                        <br><span class="sev-badge sev-low"><?= $row['infection_percentage'] !== null ? number_format((float)$row['infection_percentage'], 2) . '%' : 'No data on file' ?></span>
-                        <?php elseif (!empty($row['severity'])): ?>
-                        <br><span class="sev-badge <?= $sev_class ?>"><?= ucfirst($row['severity']) ?></span>
-                        <?php endif; ?>
-                    </td>
-                    <td class="px-4 py-5">
-                        <div class="flex items-center gap-3">
-                            <?php if (!empty($row['farmer_photo'])): ?>
-                            <img src="uploads/<?= htmlspecialchars($row['farmer_photo']) ?>"
-                                 class="farmer-avatar"
-                                 onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-                            <div class="farmer-avatar bg-emerald-100 items-center justify-center text-emerald-600 font-black text-sm rounded-xl" style="display:none">
-                                <?= strtoupper(substr($farmer_display, 0, 1)) ?>
-                            </div>
-                            <?php else: ?>
-                            <div class="farmer-avatar bg-emerald-100 flex items-center justify-center text-emerald-600 font-black text-sm rounded-xl">
-                                <?= strtoupper(substr($farmer_display, 0, 1)) ?>
-                            </div>
-                            <?php endif; ?>
-                            <div>
-                                <span class="font-black text-gray-800 text-sm block leading-none"><?= htmlspecialchars($farmer_display) ?></span>
-                                <span class="text-[10px] font-bold text-gray-400 uppercase"><?= htmlspecialchars($row['brgy_name'] ?? '—') ?></span>
-                            </div>
-                        </div>
-                    </td>
-                    <td class="px-4 py-5">
-                        <span class="text-[11px] font-black text-gray-700"><?= htmlspecialchars(date('M d, Y', strtotime($row['report_date']))) ?></span><br>
-                        <span class="text-[9px] font-bold text-gray-400 uppercase"><?= htmlspecialchars(date('g:i A', strtotime($row['report_date']))) ?></span>
-                    </td>
-                    <td class="px-4 py-5">
-                        <span class="text-[11px] font-black text-gray-700 uppercase"><?= htmlspecialchars($row['brgy_name'] ?? '— Unassigned —') ?></span>
-                    </td>
-                    <td class="px-4 py-5 text-center">
-                        <button onclick='openViewModal(<?= htmlspecialchars(json_encode($modal_row), ENT_QUOTES, 'UTF-8') ?>)' class="btn-intel bg-gray-900 text-white px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest">View Only</button>
-                    </td>
-                </tr>
-                <?php endforeach; else: ?>
-                    <tr><td colspan="4" class="p-10 text-center text-gray-400 font-bold uppercase text-xs">No reports found for this barangay.</td></tr>
+                // Searchable text for the client-side search bar — farmer,
+                // report #, barangay, and disease name(s), same fields the
+                // Farm Reports search matches on.
+                $rowSearch = strtolower(implode(' ', [
+                    $farmer_display, $row['reference_id'], $row['brgy_name'] ?? '',
+                    $combined['name'] ?? '',
+                ]));
+        ?>
+        <div class="dr-row" style="border-left:3px solid <?= $rowAccent ?>"
+             data-search="<?= htmlspecialchars($rowSearch) ?>"
+             onclick='openViewModal(<?= htmlspecialchars(json_encode($modal_row), ENT_QUOTES, 'UTF-8') ?>)'>
+            <div class="flex items-center gap-3.5 min-w-0">
+                <?php if (!empty($row['farmer_photo'])): ?>
+                <img src="uploads/<?= htmlspecialchars($row['farmer_photo']) ?>"
+                     class="farmer-avatar"
+                     onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+                <div class="farmer-avatar bg-emerald-100 items-center justify-center text-emerald-600 font-black text-sm rounded-xl" style="display:none">
+                    <?= strtoupper(substr($farmer_display, 0, 1)) ?>
+                </div>
+                <?php else: ?>
+                <div class="farmer-avatar bg-emerald-100 flex items-center justify-center text-emerald-600 font-black text-sm rounded-xl shrink-0">
+                    <?= strtoupper(substr($farmer_display, 0, 1)) ?>
+                </div>
                 <?php endif; ?>
-            </tbody>
-        </table>
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="font-bold text-gray-900 text-sm truncate"><?= htmlspecialchars($farmer_display) ?></span>
+                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-300"><?= htmlspecialchars($row['reference_id']) ?></span>
+                        <span class="dr-type-chip"><?= htmlspecialchars($combined['name'] ?: '—') ?></span>
+                    </div>
+                    <p class="text-xs text-gray-500 font-medium truncate">
+                        <?= htmlspecialchars($row['brgy_name'] ?? '— Unassigned —') ?> &nbsp;&bull;&nbsp; <?= htmlspecialchars(date('M d, Y', strtotime($row['report_date']))) ?> &middot; <?= htmlspecialchars(date('g:i A', strtotime($row['report_date']))) ?>
+                    </p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+                <?php if ($isInfectionDisease): ?>
+                <span class="sev-badge sev-low"><?= $row['infection_percentage'] !== null ? number_format((float)$row['infection_percentage'], 2) . '%' : 'No data on file' ?></span>
+                <?php elseif (!empty($row['severity'])): ?>
+                <span class="sev-badge <?= $sev_class ?>"><?= ucfirst($row['severity']) ?></span>
+                <?php endif; ?>
+                <?php if ($activeTab === 'all'):
+                    $statusPillStyle = match($row['status']) {
+                        'pending'  => 'background:#ede9fe;color:#6d28d9',
+                        'verified' => 'background:#dbeafe;color:#1d4ed8',
+                        'resolved' => 'background:#d1fae5;color:#065f46',
+                        'rejected' => 'background:#f3f4f6;color:#6b7280',
+                        default    => 'background:#f3f4f6;color:#6b7280',
+                    };
+                ?>
+                <span class="sev-badge" style="<?= $statusPillStyle ?>"><?= htmlspecialchars(ucfirst($row['status'])) ?></span>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php endforeach; else: ?>
+            <div class="dr-empty"><p class="text-xs font-bold uppercase tracking-widest">No reports found for this barangay.</p></div>
+
+        <?php endif; ?>
     </div>
+
+    <!-- Shown by filterDrRows() when a search term matches none of the
+         currently loaded rows (distinct from the "no reports" message
+         above, which covers an empty tab). -->
+    <div id="drSearchEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No reports match your search</p></div>
+
+    <!-- Carries this tab's rows to the client so the PDF export button (and
+         the AJAX tab-switch script below) always has the right data, even
+         after switching tabs without a page reload. -->
+    <script type="application/json" id="drTableRowsData"><?= json_encode($tableRows) ?></script>
+
+    </div><!-- /#drPanel -->
 </div>
 
 <?php endif; // end $view === 'disease' ?>
@@ -1001,8 +1106,10 @@ render_review_modal($STATUS_FLOW, $allDiseasesForPicker);
 
 
 <script>
-// All reports currently loaded for the active tab (used for bulk PDF export)
-const currentTabReports = <?= json_encode($tableRows) ?>;
+// All reports currently loaded for the active tab (used for bulk PDF export).
+// `let`, not `const` — the AJAX tab-switch script below reassigns this each
+// time the panel is swapped in, so the export button stays in sync.
+let currentTabReports = <?= json_encode($tableRows) ?>;
 
 <?php include __DIR__ . '/pdf_generator.php'; ?>
 
@@ -1050,6 +1157,112 @@ window.addEventListener('DOMContentLoaded', function() {
     if (table) table.scrollIntoView({ behavior:'smooth', block:'start' });
 });
 <?php endif; ?>
+</script>
+
+<!-- ═══ AJAX TAB/FILTER SWITCHING FOR THE DISEASE REPORTS PANEL ═══
+     Turns the Pending / Verified / Resolved tabs, the barangay/date filters,
+     and the "Clear" link inside #drPanel into in-place AJAX swaps instead of
+     full-page navigations, so switching tabs doesn't reload the whole page.
+     Falls back to a normal navigation if anything goes wrong. -->
+<script>
+(function () {
+    var PANEL_ID = 'drPanel';
+
+    function getPanel() {
+        return document.getElementById(PANEL_ID);
+    }
+
+    function swapPanel(html, url, pushState) {
+        var panel = getPanel();
+        if (!panel) { window.location.href = url; return; }
+
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var newPanel = doc.getElementById(PANEL_ID);
+        if (!newPanel) { window.location.href = url; return; }
+
+        panel.replaceWith(newPanel);
+
+        // Keep the PDF export button's data in sync with whichever tab is
+        // now showing (each panel carries its own rows in a JSON island).
+        var dataEl = newPanel.querySelector('#drTableRowsData');
+        if (dataEl) {
+            try { currentTabReports = JSON.parse(dataEl.textContent || '[]'); }
+            catch (e) { /* keep the previous data rather than break export */ }
+        }
+
+        if (pushState) {
+            history.pushState({ drPanel: true }, '', url);
+        }
+    }
+
+    function loadPanel(url, pushState) {
+        var panel = getPanel();
+        if (panel) panel.classList.add('dr-panel-loading');
+
+        fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(function (resp) {
+                if (!resp.ok) throw new Error('Request failed: ' + resp.status);
+                return resp.text();
+            })
+            .then(function (html) { swapPanel(html, url, pushState); })
+            .catch(function () { window.location.href = url; })
+            .finally(function () {
+                var p = getPanel();
+                if (p) p.classList.remove('dr-panel-loading');
+            });
+    }
+
+    // Tabs + the "Clear filter" link are plain "?..." query links inside the
+    // panel — intercept clicks on any of them and swap in place.
+    document.addEventListener('click', function (e) {
+        var link = e.target.closest('#' + PANEL_ID + ' a[href^="?"]');
+        if (!link) return;
+        e.preventDefault();
+        loadPanel(link.getAttribute('href'), true);
+    });
+
+    // The "Filter" button submits the barangay/date form via GET — route
+    // that through the same AJAX path.
+    document.addEventListener('submit', function (e) {
+        var form = e.target.closest('#' + PANEL_ID + ' form[method="get"]');
+        if (!form) return;
+        e.preventDefault();
+        var params = new URLSearchParams(new FormData(form));
+        loadPanel(window.location.pathname + '?' + params.toString(), true);
+    });
+
+    // The barangay <select> submits on change (not via the Filter button) —
+    // called directly from its onchange attribute instead of this.form.submit().
+    window.drSubmitFilterForm = function (form) {
+        var params = new URLSearchParams(new FormData(form));
+        loadPanel(window.location.pathname + '?' + params.toString(), true);
+    };
+
+    // Instant client-side search across the rows already loaded for the
+    // current tab — same behavior as the Farm Reports search bar. Defined
+    // globally (not re-bound per panel) since #drPanel gets replaced whole
+    // on every tab switch; this just re-queries the DOM each time it runs.
+    window.filterDrRows = function () {
+        var panel = getPanel();
+        if (!panel) return;
+        var input = panel.querySelector('#drSearchInput');
+        var term = ((input && input.value) || '').trim().toLowerCase();
+        var rows = panel.querySelectorAll('.dr-row');
+        var visibleCount = 0;
+        rows.forEach(function (row) {
+            var matches = !term || (row.dataset.search || '').indexOf(term) !== -1;
+            row.style.display = matches ? '' : 'none';
+            if (matches) visibleCount++;
+        });
+        var emptyEl = panel.querySelector('#drSearchEmpty');
+        if (emptyEl) emptyEl.classList.toggle('hidden', !(term && visibleCount === 0));
+    };
+
+    // Support the browser's Back/Forward buttons for tab/filter changes.
+    window.addEventListener('popstate', function () {
+        loadPanel(window.location.href, false);
+    });
+})();
 </script>
 
 <?php include "includes/layout-end.php"; ?>
