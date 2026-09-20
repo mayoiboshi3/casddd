@@ -568,7 +568,7 @@ window.addEventListener('DOMContentLoaded',()=>{
      REPORT DETAIL MODAL
 ═════════════════════════════════════════════════════════════ -->
 <div id="reportDetailModal" class="hidden fixed inset-0 bg-slate-900/85 backdrop-blur-md z-[200] flex items-center justify-center p-4">
-    <div class="bg-white w-full max-w-lg rounded-[2rem] overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+    <div class="bg-white w-full max-w-2xl rounded-[2rem] overflow-hidden shadow-2xl flex flex-col max-h-[92vh]">
 
         <div class="p-6 border-b border-slate-100 bg-slate-50/70 flex-shrink-0">
             <div class="flex items-start justify-between gap-4">
@@ -591,22 +591,7 @@ window.addEventListener('DOMContentLoaded',()=>{
         <div class="overflow-y-auto flex-grow p-6 space-y-5">
 
             <div id="rd_photo_wrap" class="hidden">
-                <img id="rd_photo" src="" alt="Evidence photo" class="w-full rounded-2xl object-cover max-h-52 border border-slate-100 shadow-sm">
-            </div>
-
-            <div class="grid grid-cols-3 gap-3">
-                <div class="bg-slate-50 rounded-xl p-4 text-center border border-slate-100">
-                    <div id="rd_pct" class="text-3xl font-black text-slate-800"></div>
-                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1">Infection %</div>
-                </div>
-                <div class="bg-slate-50 rounded-xl p-4 text-center border border-slate-100">
-                    <div id="rd_affected" class="text-3xl font-black text-slate-800"></div>
-                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1">Plants Affected</div>
-                </div>
-                <div class="bg-slate-50 rounded-xl p-4 text-center border border-slate-100">
-                    <div id="rd_total" class="text-3xl font-black text-slate-800"></div>
-                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1">Total Plants</div>
-                </div>
+                <img id="rd_photo" src="" alt="Evidence photo" class="w-full rounded-2xl object-cover max-h-72 border border-slate-100 shadow-sm">
             </div>
 
             <div class="grid grid-cols-2 gap-3">
@@ -1223,9 +1208,6 @@ function openReportDetail(idx) {
         photoWrap.classList.add('hidden');
     }
 
-    document.getElementById('rd_pct').textContent      = r.infection_percentage ? parseFloat(r.infection_percentage).toFixed(1) + '%' : '—';
-    document.getElementById('rd_affected').textContent = r.plants_affected ?? '—';
-    document.getElementById('rd_total').textContent    = r.total_plants    ?? '—';
 
     document.getElementById('rd_report_date').textContent  = fmtDate(r.report_date);
     document.getElementById('rd_date_planted').textContent = fmtDate(r.date_planted);
