@@ -37,6 +37,8 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 // Needs these columns on planting_harvesting_reports (added manually in the database):
 //   created_by INT, verified_by INT, rejected_by INT, rejected_at DATETIME
 require_once __DIR__ . '/personnel_log.php';
+// Month-view calendar of reports per day (shared with the Disease Reports screen)
+require_once __DIR__ . '/case_calendar.php';
 
 // --- SELF-HEALING SCHEMA: 'source' column on planting_harvesting_reports ---
 // Lets us tell farmer-submitted reports apart from ones a staff member typed
@@ -408,7 +410,8 @@ function ph_type_badge_class($type) {
 function ph_status_pill_class($status) {
     return match ($status) {
         'verified' => 'bg-blue-100 text-blue-700',
-        default    => 'bg-purple-100 text-purple-700', // pending / received / ''
+        'rejected' => 'bg-red-100 text-red-700',
+        default    => 'bg-orange-100 text-orange-700', // pending / received / ''
     };
 }
 function ph_status_label($status) {
@@ -459,6 +462,7 @@ function render_planting_harvesting_section($conn) {
          Shown directly on the page (no "View Reports" click required) — the
          farm activity list, tabs, search and filters all render inline as
          soon as the page loads. -->
+    <?php render_case_calendar_assets(); ?>
     <div id="ph-section" class="mt-10">
     <div class="bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl">
         <div class="flex items-center justify-between gap-4 mb-6 flex-wrap">
@@ -499,6 +503,16 @@ function render_planting_harvesting_section($conn) {
                     class="hidden text-[10px] font-bold uppercase tracking-widest text-gray-400 hover:text-gray-700 px-2">
                 Clear
             </button>
+            <button type="button" id="phCalToggle" onclick="phToggleCalendar()"
+                    class="btn-intel bg-white border border-gray-200 text-gray-700 px-4 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 shrink-0">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path stroke-linecap="round" d="M16 2v4M8 2v4M3 10h18"></path></svg>
+                Calendar
+            </button>
+        </div>
+
+        <!-- Calendar: reports per day for the tab that's open. A day click sets the date filter above. -->
+        <div id="phCalendarWrap" class="hidden pt-4">
+            <div id="phCalendarMount"></div>
         </div>
 
         <div class="pt-3 pb-1 flex items-center gap-2 flex-wrap" id="phFilterChips"></div>
@@ -1027,14 +1041,14 @@ function render_planting_harvesting_section($conn) {
     const phAllReports = <?= json_encode($ph_all_rows) ?>;
     const PH_STATUS_BADGE = {
         verified: 'bg-blue-100 text-blue-700',
-        pending: 'bg-purple-100 text-purple-700',
-        rejected: 'bg-rose-100 text-rose-700'
+        pending: 'bg-orange-100 text-orange-700',
+        rejected: 'bg-red-100 text-red-700'
     };
 
     const PH_STATUS_ICON = {
         verified: { bg: '#dbeafe', fg: '#1d4ed8', path: 'M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
-        pending: { bg: '#ede9fe', fg: '#6d28d9', path: 'M12 6v6l4 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
-        rejected: { bg: '#ffe4e6', fg: '#be123c', path: 'M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z' }
+        pending: { bg: '#ffedd5', fg: '#c2410c', path: 'M12 6v6l4 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
+        rejected: { bg: '#fee2e2', fg: '#b91c1c', path: 'M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z' }
     };
     const PH_CROP_LABEL = { yellow_corn: 'Yellow Corn', white_corn: 'White Corn', cassava: 'Cassava' };
     const PH_TYPE_BADGE = {
@@ -1049,6 +1063,14 @@ function render_planting_harvesting_section($conn) {
         damage: '#fb7185',
         growth: '#2dd4bf'
     };
+    // Left-edge accent color for each row, keyed to the report's status instead
+    // of its type — matches the status-pill colors: orange = pending,
+    // blue = verified, red = rejected.
+    const PH_STATUS_ACCENT = {
+        pending: '#f97316',
+        verified: '#2563eb',
+        rejected: '#ef4444'
+    };
     const PH_STATUS_ORDER = ['pending', 'verified', 'rejected'];
     const PH_STATUS_LABEL = { pending: 'Pending', verified: 'Verified', rejected: 'Rejected' };
     // "Growth" reports don't get their own tab — they're rare enough that a
@@ -1058,6 +1080,7 @@ function render_planting_harvesting_section($conn) {
     const PH_TYPE_TAB_LABEL = { planting: 'Planting', harvesting: 'Harvesting', damage: 'Damage' };
     let phCurrentFilter = 'all';
     let phCurrentTypeTab = 'all';
+    let phCalendar = null;   // the calendar instance (see phInitCalendar)
 
     // Which reports the CURRENT tab covers: All = everything, Planting/Harvesting/Damage = that
     // report type, Rejected = every rejected report (any type) — same idea as the Rejected tab
@@ -1066,6 +1089,50 @@ function render_planting_harvesting_section($conn) {
         if (phCurrentTypeTab === 'all')      return phAllReports;
         if (phCurrentTypeTab === 'rejected') return phAllReports.filter(r => r.status === 'rejected');
         return phAllReports.filter(r => r.report_type === phCurrentTypeTab);
+    }
+
+    // ── CALENDAR ──
+    // Shows the reports of the tab that's open (All / Planting / Harvesting / Damage / Rejected) per
+    // day, by submission date — the same date the list's date filter uses. Clicking a day fills the
+    // date filter; clicking it again clears it. The status chips and search box narrow the LIST only,
+    // so the calendar stays a stable summary while you drill in.
+    const PH_CAL_STATUSES = [
+        { key: 'pending',  label: 'Pending',  color: '#f97316' },
+        { key: 'verified', label: 'Verified', color: '#2563eb' },
+        { key: 'rejected', label: 'Rejected', color: '#ef4444' }
+    ];
+    let phCalOpen = false;   // closed until the Calendar button is clicked (every page load starts closed)
+
+    function phCalRefresh(selectedDate) {
+        if (!phCalendar) return;
+        const events = phScopedReports()
+            .map(r => ({ d: (r.submitted_at || '').slice(0, 10), s: r.status }))
+            .filter(e => /^\d{4}-\d{2}-\d{2}$/.test(e.d));
+        phCalendar.setData({ events: events, selected: selectedDate || null });
+    }
+    function phApplyCalendarOpenState() {
+        const open = phCalOpen;
+        const wrap = document.getElementById('phCalendarWrap');
+        const btn  = document.getElementById('phCalToggle');
+        if (wrap) wrap.classList.toggle('hidden', !open);
+        if (btn)  btn.classList.toggle('cc-toggle-on', open);
+    }
+    function phToggleCalendar() {
+        const wrap = document.getElementById('phCalendarWrap');
+        if (!wrap) return;
+        phCalOpen = wrap.classList.contains('hidden');   // opening?
+        phApplyCalendarOpenState();
+    }
+    function phInitCalendar() {
+        const mount = document.getElementById('phCalendarMount');
+        if (!mount || !window.CaseCalendar) return;
+        phCalendar = window.CaseCalendar.create({
+            mount: mount, viewKey: 'farm', noun: 'report', statuses: PH_CAL_STATUSES,
+            onPick:  (d) => { document.getElementById('phDateInput').value = d;  renderPHRows(); },
+            onClear: ()  => { document.getElementById('phDateInput').value = ''; renderPHRows(); }
+        });
+        renderPHRows();               // draws the list AND hands the calendar its first data
+        phApplyCalendarOpenState();
     }
 
     function phFormatDate(iso) {
@@ -1189,6 +1256,7 @@ function render_planting_harvesting_section($conn) {
         const body = document.getElementById('phAllReportsBody');
         const searchTerm = (document.getElementById('phSearchInput')?.value || '').trim().toLowerCase();
         const dateFilter = document.getElementById('phDateInput')?.value || '';
+        phCalRefresh(dateFilter);   // calendar follows the current tab + the date filter
 
         let rows = phScopedReports();
 
@@ -1249,7 +1317,7 @@ function render_planting_harvesting_section($conn) {
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${icon.path}"/></svg>
                    </div>`;
 
-            const accentColor = PH_TYPE_ACCENT[rep.report_type] || PH_TYPE_ACCENT.planting;
+            const accentColor = PH_STATUS_ACCENT[rep.status] || PH_STATUS_ACCENT.pending;
 
             const row = document.createElement('div');
             row.className = 'ph-row';
@@ -1289,6 +1357,7 @@ function render_planting_harvesting_section($conn) {
         buildPHTypeTabs();
         buildPHFilterChips();
         renderPHRows();
+        phInitCalendar();
     }
 
     function closePHModal(id) {
@@ -1473,8 +1542,8 @@ function render_planting_harvesting_section($conn) {
         const pill = document.getElementById('phv_status_pill');
         const pillClasses = {
             verified: 'bg-blue-100 text-blue-700',
-            pending: 'bg-purple-100 text-purple-700',
-            rejected: 'bg-rose-100 text-rose-700'
+            pending: 'bg-orange-100 text-orange-700',
+            rejected: 'bg-red-100 text-red-700'
         };
         pill.className = 'sev-badge ml-auto ' + (pillClasses[data.status] || pillClasses.pending);
         pill.textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);

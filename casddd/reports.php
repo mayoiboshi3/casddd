@@ -4,7 +4,7 @@
 // away and answer the browser's fetch() with pure JSON. Normal page loads are unaffected.
 ob_start();
 require_once __DIR__ . "/src/db_config.php"; 
-$pageTitle = "Reports"; 
+$pageTitle = "Disease Reports"; 
 include "includes/layout.php"; 
 
 // --- SELF-HEALING SCHEMA: case_messages table (log of sent recommendations) ---
@@ -33,6 +33,8 @@ if ($col_check && mysqli_num_rows($col_check) === 0) {
 // --- PERSONNEL LOG: who created / verified / rejected each case. Exposes the
 // helpers used below (needs verified_at / rejected_by / rejected_at / resolved_by / resolved_at on disease_cases).
 require_once __DIR__ . "/personnel_log.php";
+// --- CASE CALENDAR: month view of cases per day (shared with the Farm Reports screen) ---
+require_once __DIR__ . "/case_calendar.php";
 
 // --- NEW FIELD CASE REPORT: form + insert logic now live in their own file ---
 // (runs the POST-insert handling immediately here, same as before; the modal's
@@ -766,7 +768,7 @@ $tableRows = [];
         <div class="flex items-center gap-4">
             <div class="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0 text-2xl">🌽</div>
             <div>
-                <h3 class="text-lg font-bold text-gray-900 tracking-tight">Disease Reports</h3>
+                <h3 class="text-lg font-bold text-gray-900 tracking-tight">Farmer Reports</h3>
                 <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Corn disease cases reported by farmers</p>
             </div>
         </div>
@@ -784,6 +786,7 @@ $tableRows = [];
     <!-- ── AJAX panel: tabs + filters + case list. Swapped in place via JS
          (see bottom of file) instead of a full page navigation, so switching
          between Pending / Verified / Resolved doesn't reload the page. ── -->
+    <?php render_case_calendar_assets(); ?>
     <div id="drPanel">
 
     <!-- ── Tabs: same browser-tab look as the Farm Reports section ── -->
@@ -860,6 +863,12 @@ $tableRows = [];
                 </a>
                 <?php endif; ?>
             </form>
+
+            <button type="button" id="drCalToggle" onclick="drToggleCalendar()"
+                class="btn-intel bg-white border border-gray-200 text-gray-700 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center gap-2 shrink-0">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path stroke-linecap="round" d="M16 2v4M8 2v4M3 10h18"></path></svg>
+                Calendar
+            </button>
         </div>
 
         <?php if ($activeTab === 'verified' || $activeTab === 'resolved'): ?>
@@ -871,6 +880,32 @@ $tableRows = [];
         <?php endif; ?>
     </div>
     
+    <?php
+    // ── CALENDAR DATA: one entry per REPORT (a report with several diseases is several rows sharing a
+    // reference_id, so it is grouped exactly like the list below), dated by when it was filed.
+    // Covers every status, so the calendar is a true date summary no matter which tab is open;
+    // it follows the barangay filter only. Picking a day applies the date filter above.
+    $calEvents  = [];
+    $calBrgySql = $filterBarangayId ? "WHERE barangay_id = " . (int)$filterBarangayId : "";
+    $cal_q = mysqli_query($conn, "SELECT reference_id, DATE(MIN(report_date)) AS d, MIN(status) AS s
+                                  FROM disease_cases $calBrgySql GROUP BY reference_id");
+    if ($cal_q) {
+        while ($c = mysqli_fetch_assoc($cal_q)) {
+            if (!empty($c['d'])) { $calEvents[] = ['d' => $c['d'], 's' => $c['s'] ?: 'pending']; }
+        }
+    }
+    $calIso      = fn($v) => preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$v) ? $v : null;
+    $calFrom     = $calIso($filterDateFrom);
+    $calTo       = $calIso($filterDateTo);
+    $calSelected = ($calFrom && $calFrom === $calTo) ? $calFrom : null;
+    ?>
+    <div id="drCalendarWrap" class="hidden pt-4">
+        <div id="drCalendarMount"></div>
+    </div>
+    <script type="application/json" id="drCalendarData"><?= json_encode([
+        'events' => $calEvents, 'selected' => $calSelected, 'from' => $calFrom, 'to' => $calTo,
+    ], JSON_HEX_TAG) ?></script>
+
     <div class="divide-y divide-gray-50 mt-2">
         <?php
         $brgy_filter = $filterBarangayId ? "AND dc.barangay_id = $filterBarangayId" : "";
@@ -985,15 +1020,15 @@ $tableRows = [];
                 $tableRows[] = $modal_row;
 
                 // Left-edge accent color, same idea as the Farm Reports rows
-                // (a colored strip keyed to the row's category) — here keyed
-                // to severity/infection rather than report type.
-                $rowAccent = match(true) {
-                    $isInfectionDisease => '#2dd4bf',
-                    $row['severity'] === 'low'      => '#10b981',
-                    $row['severity'] === 'moderate' => '#f59e0b',
-                    $row['severity'] === 'high'     => '#ef4444',
-                    $row['severity'] === 'critical' => '#ec4899',
-                    default => '#9ca3af',
+                // (a colored strip keyed to the row's category) — keyed to the
+                // case's status, matching the status-pill colors below:
+                // orange = pending, blue = verified, red = rejected, green = resolved.
+                $rowAccent = match($row['status']) {
+                    'pending'  => '#f97316',
+                    'verified' => '#2563eb',
+                    'resolved' => '#059669',
+                    'rejected' => '#ef4444',
+                    default    => '#9ca3af',
                 };
 
                 // Searchable text for the client-side search bar — farmer,
@@ -1039,10 +1074,10 @@ $tableRows = [];
                 <?php endif; ?>
                 <?php if ($activeTab === 'all'):
                     $statusPillStyle = match($row['status']) {
-                        'pending'  => 'background:#ede9fe;color:#6d28d9',
+                        'pending'  => 'background:#ffedd5;color:#c2410c',
                         'verified' => 'background:#dbeafe;color:#1d4ed8',
                         'resolved' => 'background:#d1fae5;color:#065f46',
-                        'rejected' => 'background:#f3f4f6;color:#6b7280',
+                        'rejected' => 'background:#fee2e2;color:#b91c1c',
                         default    => 'background:#f3f4f6;color:#6b7280',
                     };
                 ?>
@@ -1212,6 +1247,9 @@ window.addEventListener('DOMContentLoaded', function() {
 
         panel.replaceWith(newPanel);
 
+        // The calendar lives inside the panel, so it was just replaced too — redraw it.
+        if (window.drCalendarInit) { window.drCalendarInit(); }
+
         // Keep the PDF export button's data in sync with whichever tab is
         // now showing (each panel carries its own rows in a JSON island).
         var dataEl = newPanel.querySelector('#drTableRowsData');
@@ -1241,6 +1279,8 @@ window.addEventListener('DOMContentLoaded', function() {
                 if (p) p.classList.remove('dr-panel-loading');
             });
     }
+
+    window.drLoadPanel = loadPanel;   // used by the calendar to filter by day
 
     // Tabs + the "Clear filter" link are plain "?..." query links inside the
     // panel — intercept clicks on any of them and swap in place.
@@ -1292,6 +1332,68 @@ window.addEventListener('DOMContentLoaded', function() {
     window.addEventListener('popstate', function () {
         loadPanel(window.location.href, false);
     });
+})();
+</script>
+
+<!-- ── DISEASE REPORTS CALENDAR: draws the calendar inside the panel and turns a day click into the
+     existing date filter (same AJAX panel swap the tabs use). Redrawn by drCalendarInit() after every swap. ── -->
+<script>
+(function () {
+    var STATUSES = [
+        { key: 'pending',  label: 'Pending',  color: '#f97316' },
+        { key: 'verified', label: 'Verified', color: '#2563eb' },
+        { key: 'resolved', label: 'Resolved', color: '#059669' },
+        { key: 'rejected', label: 'Rejected', color: '#ef4444' }
+    ];
+
+    // Day picked -> show that day's cases from EVERY status (All tab); cleared -> back to the tab that was open.
+    function go(dateStr) {
+        var panel = document.getElementById('drPanel');
+        var sel   = panel && panel.querySelector('select[name="brgy_filter"]');
+        var tabEl = panel && panel.querySelector('input[name="tab"]');
+        var brgy  = sel ? sel.value : '0';
+        var p = new URLSearchParams();
+        p.set('tab', dateStr ? 'all' : (tabEl && tabEl.value ? tabEl.value : 'all'));
+        if (brgy && brgy !== '0') { p.set('brgy_filter', brgy); }
+        if (dateStr) { p.set('date_from', dateStr); p.set('date_to', dateStr); }
+        var url = window.location.pathname + '?' + p.toString();
+        if (window.drLoadPanel) { window.drLoadPanel(url, true); } else { window.location.href = url; }
+    }
+
+    // Closed until the Calendar button is clicked. The choice is kept in memory only, so it survives
+    // the panel being swapped (day click / filter change) but every fresh page load starts closed.
+    function applyOpenState() {
+        var open = !!window.__drCalOpen;
+        var wrap = document.getElementById('drCalendarWrap');
+        var btn  = document.getElementById('drCalToggle');
+        if (wrap) { wrap.classList.toggle('hidden', !open); }
+        if (btn)  { btn.classList.toggle('cc-toggle-on', open); }
+    }
+
+    window.drCalendarInit = function () {
+        var mount  = document.getElementById('drCalendarMount');
+        var dataEl = document.getElementById('drCalendarData');
+        if (!mount || !dataEl || !window.CaseCalendar) { return; }
+        var data;
+        try { data = JSON.parse(dataEl.textContent || '{}'); } catch (e) { return; }
+        var cal = window.CaseCalendar.create({
+            mount: mount, viewKey: 'disease', noun: 'case', statuses: STATUSES,
+            onPick:  function (d) { go(d); },
+            onClear: function ()  { go(null); }
+        });
+        cal.setData(data);
+        applyOpenState();
+    };
+
+    window.drToggleCalendar = function () {
+        var wrap = document.getElementById('drCalendarWrap');
+        if (!wrap) { return; }
+        window.__drCalOpen = wrap.classList.contains('hidden');   // opening?
+        applyOpenState();
+    };
+
+    if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', window.drCalendarInit); }
+    else { window.drCalendarInit(); }
 })();
 </script>
 
