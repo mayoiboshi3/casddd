@@ -30,6 +30,13 @@ if ($col_check && mysqli_num_rows($col_check) === 0) {
     mysqli_query($conn, "ALTER TABLE disease_cases ADD COLUMN infection_percentage DECIMAL(5,2) DEFAULT NULL AFTER total_plants");
 }
 
+// --- REPORT SOURCE: disease_cases.source is 'manual_report' (the default) or 'scan' ---
+// 'scan' = the AI image detector classified the photo. Those cases are listed under AI Scans
+// (?view=scans). Disease Reports only shows manual_report cases, so every Disease Reports query
+// below adds one of these filters.
+$manualOnlySql   = "`source` = 'manual_report'";
+$manualOnlySqlDc = "dc.`source` = 'manual_report'";
+
 // --- PERSONNEL LOG: who created / verified / rejected each case. Exposes the
 // helpers used below (needs verified_at / rejected_by / rejected_at / resolved_by / resolved_at on disease_cases).
 require_once __DIR__ . "/personnel_log.php";
@@ -402,8 +409,19 @@ $stats_query = mysqli_query($conn, "SELECT COUNT(*) as total,
     COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending, 
     COUNT(CASE WHEN status = 'verified' THEN 1 END) as verified, 
     COUNT(CASE WHEN status = 'resolved' THEN 1 END) as resolved, 
-    COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected FROM disease_cases");
+    COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected FROM disease_cases WHERE $manualOnlySql");
 $stats     = mysqli_fetch_assoc($stats_query);
+
+// AI scans are counted on their own and never mixed into the report numbers above.
+$scanStats = ['total' => 0, 'week' => 0];
+$ss_q = mysqli_query($conn, "SELECT
+    COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS total,
+    COUNT(DISTINCT CASE WHEN report_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+          THEN COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id)) END) AS week
+    FROM disease_cases WHERE `source` = 'scan'");
+if ($ss_q && $ss_row = mysqli_fetch_assoc($ss_q)) {
+    $scanStats = ['total' => (int)$ss_row['total'], 'week' => (int)$ss_row['week']];
+}
 $activeTab = $_GET['tab'] ?? 'pending';
 
 // ── TOP-LEVEL REPORT VIEW: Disease Reports vs Planting & Harvesting Reports ──
@@ -414,7 +432,7 @@ $activeTab = $_GET['tab'] ?? 'pending';
 // the page, so only one report type (and its own stats/actions) is ever on
 // screen at once.
 $view = $_GET['view'] ?? 'disease';
-if (!in_array($view, ['disease', 'farm'], true)) { $view = 'disease'; }
+if (!in_array($view, ['disease', 'scans', 'farm'], true)) { $view = 'disease'; }
 
 // FROM DASHBOARD MAP
 $autoOpenCaseId   = isset($_GET['case_id'])     ? (int)$_GET['case_id']     : 0;
@@ -423,6 +441,24 @@ $filterBarangayId = isset($_GET['barangay_id']) ? (int)$_GET['barangay_id'] : 0;
 // A deep link from the dashboard map always points at a specific disease case,
 // so always land on the Disease Reports view for it regardless of ?view=.
 if ($autoOpenCaseId || $filterBarangayId) { $view = 'disease'; }
+
+// ...unless that case was AI-scanned: scanned cases live in the AI Scans view, not in Reports.
+// Send the browser there instead (and highlight the row).
+if ($autoOpenCaseId) {
+    $dl_q   = mysqli_query($conn, "SELECT `source` FROM disease_cases WHERE case_id = $autoOpenCaseId LIMIT 1");
+    $dl_row = $dl_q ? mysqli_fetch_assoc($dl_q) : null;
+    if ($dl_row && $dl_row['source'] === 'scan') {
+        $dl_url = 'reports.php?view=scans&scan_id=' . $autoOpenCaseId
+                . ($filterBarangayId ? '&brgy_filter=' . $filterBarangayId : '');
+        while (ob_get_level() > 0) { ob_end_clean(); }
+        if (!headers_sent()) {
+            header('Location: ' . $dl_url);
+        } else {
+            echo "<script>window.location='" . $dl_url . "';</script>";
+        }
+        exit;
+    }
+}
 
 // ── TAB FILTERS: date range + barangay dropdown (applies within each tab) ──
 $filterDateFrom = trim($_GET['date_from'] ?? '');
@@ -433,7 +469,7 @@ if ($filterBrgyDrop) { $filterBarangayId = $filterBrgyDrop; }
 $allBarangays_q = mysqli_query($conn, "SELECT id, name FROM barangays ORDER BY name ASC");
 
 if ($filterBarangayId && !isset($_GET['tab'])) {
-    $tab_q = mysqli_query($conn, "SELECT status FROM disease_cases WHERE barangay_id=$filterBarangayId ORDER BY FIELD(status,'pending','verified','resolved','rejected') LIMIT 1");
+    $tab_q = mysqli_query($conn, "SELECT status FROM disease_cases WHERE $manualOnlySql AND barangay_id=$filterBarangayId ORDER BY FIELD(status,'pending','verified','resolved','rejected') LIMIT 1");
     if ($tab_q && $row_t = mysqli_fetch_assoc($tab_q)) {
         $activeTab = $row_t['status'];
     }
@@ -729,13 +765,14 @@ $tableRows = [];
      Always visible at the top, regardless of which view is active. This is the
      single place a user picks which kind of report they want to see or file —
      Disease Reports and Farm (Planting & Harvesting) Reports never mix on the
-     same screen anymore. -->
-<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
+     same screen anymore.
+     Card order, left to right: Disease Reports, Farm Reports, AI Scans. -->
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
     <a href="?view=disease" class="btn-intel flex items-center gap-4 p-6 rounded-[1.75rem] border-2 <?= $view === 'disease' ? 'bg-emerald-600 border-emerald-600 shadow-lg' : 'bg-white border-gray-100 hover:border-emerald-200' ?>">
         <div class="w-12 h-12 flex-shrink-0 rounded-2xl flex items-center justify-center text-2xl <?= $view === 'disease' ? 'bg-white/15' : 'bg-emerald-50' ?>">🌽</div>
         <div class="text-left">
             <p class="font-black text-sm uppercase tracking-wide <?= $view === 'disease' ? 'text-white' : 'text-gray-800' ?>">Disease Reports</p>
-            <p class="text-[11px] font-bold <?= $view === 'disease' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$stats['total'] ?> total &middot; <?= (int)$stats['pending'] ?> awaiting review</p>
+            <p class="text-[11px] font-bold <?= $view === 'disease' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$stats['total'] ?> manual &middot; <?= (int)$stats['pending'] ?> awaiting review</p>
         </div>
     </a>
     <a href="?view=farm" class="btn-intel flex items-center gap-4 p-6 rounded-[1.75rem] border-2 <?= $view === 'farm' ? 'bg-emerald-600 border-emerald-600 shadow-lg' : 'bg-white border-gray-100 hover:border-emerald-200' ?>">
@@ -743,6 +780,13 @@ $tableRows = [];
         <div class="text-left">
             <p class="font-black text-sm uppercase tracking-wide <?= $view === 'farm' ? 'text-white' : 'text-gray-800' ?>">Farm Reports</p>
             <p class="text-[11px] font-bold <?= $view === 'farm' ? 'text-white/80' : 'text-gray-400' ?>">Farmer planting &amp; harvest activity</p>
+        </div>
+    </a>
+    <a href="?view=scans" class="btn-intel flex items-center gap-4 p-6 rounded-[1.75rem] border-2 <?= $view === 'scans' ? 'bg-emerald-600 border-emerald-600 shadow-lg' : 'bg-white border-gray-100 hover:border-emerald-200' ?>">
+        <div class="w-12 h-12 flex-shrink-0 rounded-2xl flex items-center justify-center text-2xl <?= $view === 'scans' ? 'bg-white/15' : 'bg-emerald-50' ?>">&#128247;</div>
+        <div class="text-left">
+            <p class="font-black text-sm uppercase tracking-wide <?= $view === 'scans' ? 'text-white' : 'text-gray-800' ?>">AI Scans</p>
+            <p class="text-[11px] font-bold <?= $view === 'scans' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$scanStats['total'] ?> scanned &middot; <?= (int)$scanStats['week'] ?> this week</p>
         </div>
     </a>
 </div>
@@ -769,7 +813,7 @@ $tableRows = [];
             <div class="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0 text-2xl">🌽</div>
             <div>
                 <h3 class="text-lg font-bold text-gray-900 tracking-tight">Disease Reports</h3>
-                <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Corn disease cases reported by farmers</p>
+                <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Manual reports that need a person to review them. AI-scanned cases are under AI Scans.</p>
             </div>
         </div>
         <div class="flex gap-3 shrink-0">
@@ -886,7 +930,7 @@ $tableRows = [];
     // Covers every status, so the calendar is a true date summary no matter which tab is open;
     // it follows the barangay filter only. Picking a day applies the date filter above.
     $calEvents  = [];
-    $calBrgySql = $filterBarangayId ? "WHERE barangay_id = " . (int)$filterBarangayId : "";
+    $calBrgySql = "WHERE $manualOnlySql" . ($filterBarangayId ? " AND barangay_id = " . (int)$filterBarangayId : "");
     $cal_q = mysqli_query($conn, "SELECT reference_id, DATE(MIN(report_date)) AS d, MIN(status) AS s
                                   FROM disease_cases $calBrgySql GROUP BY reference_id");
     if ($cal_q) {
@@ -938,7 +982,7 @@ $tableRows = [];
                   LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
                   LEFT JOIN farmers f   ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
                   " . personnel_log_join_sql() . "
-                  WHERE 1=1 $status_filter $brgy_filter $date_filter 
+                  WHERE $manualOnlySqlDc $status_filter $brgy_filter $date_filter 
                   ORDER BY dc.report_date DESC, dc.case_id ASC";
         $result = mysqli_query($conn, $query);
 
@@ -1105,6 +1149,427 @@ $tableRows = [];
 </div>
 
 <?php endif; // end $view === 'disease' ?>
+
+<?php if ($view === 'scans'): ?>
+<?php
+// ═══ AI SCANS VIEW ═══
+// Cases the AI image detector classified (disease_cases.source = 'scan').
+// They are a plain log: no Pending -> Verified -> Resolved review, and they are never counted in
+// the Disease Reports tabs or stats. Everything else (source = 'manual_report') is a manual report
+// and shows up under Disease Reports.
+//
+// How a scan row is stored (so this view reads it the same way):
+//   - disease_id is empty; the AI's answer is in the description text:
+//       "AI scan: Corn___Common_Rust detected. Confidence: 92.2%"
+//   - there is no [FARMER:...] tag; the farmer is identified by farmer_id.
+//   - photo_evidence is a full path such as "uploads/scan_results/scan_5_1782904381.jpg".
+//
+// This panel deliberately does NOT use #drPanel: the AJAX tab script above swaps #drPanel and
+// intercepts its links, and this view is a normal page load (?view=scans) with its own filters.
+$tableRows = []; // the PDF-export script further down reads this; nothing to export here
+
+$scanBrgySql = $filterBarangayId ? "AND dc.barangay_id = " . (int)$filterBarangayId : "";
+$scanDateSql = "";
+if ($filterDateFrom !== '') {
+    $scanDateSql .= " AND dc.report_date >= '" . mysqli_real_escape_string($conn, $filterDateFrom) . "'";
+}
+if ($filterDateTo !== '') {
+    $scanDateSql .= " AND dc.report_date <= '" . mysqli_real_escape_string($conn, $filterDateTo) . " 23:59:59'";
+}
+$scanHighlightId = isset($_GET['scan_id']) ? (int)$_GET['scan_id'] : 0;   // set by the dashboard deep link
+$scanLimit       = 500;
+$scanHasFilters  = ($filterBarangayId || $filterDateFrom !== '' || $filterDateTo !== '');
+
+// Farmer name comes from the farmers table via disease_cases.farmer_id. The key column of
+// `farmers` is looked up instead of assumed (farmer_id or id); if it can't be found, the row
+// falls back to "Farmer #<id>" rather than breaking the page.
+$farmerPk = null;
+$farmerCols = [];
+$fc_q = mysqli_query($conn, "SHOW COLUMNS FROM farmers");
+if ($fc_q) { while ($fc = mysqli_fetch_assoc($fc_q)) { $farmerCols[] = $fc['Field']; } }
+if (in_array('farmer_name', $farmerCols, true)) {
+    foreach (['farmer_id', 'id'] as $cand) {
+        if (in_array($cand, $farmerCols, true)) { $farmerPk = $cand; break; }
+    }
+}
+$scanFarmerSelect = $farmerPk ? "f.farmer_name AS farmer_name_db," : "NULL AS farmer_name_db,";
+$scanFarmerJoin   = $farmerPk ? "LEFT JOIN farmers f ON f.`$farmerPk` = dc.farmer_id" : "";
+
+// Read the AI label + confidence out of the description text.
+// "Corn___Common_Rust" -> "Common Rust", "Corn__MLN" -> "MLN", "Healthy corn" and "Other" stay as they are.
+$scanParse = function ($desc) {
+    $label = null; $conf = null; $confNum = null;
+    if (preg_match('/AI scan:\s*(.+?)\s+detected\b/i', (string)$desc, $m)) {
+        $label = trim(str_replace('_', ' ', preg_replace('/^Corn_+/i', '', trim($m[1]))));
+    }
+    if (preg_match('/Confidence:\s*([\d.]+)\s*%/i', (string)$desc, $m)) {
+        $conf    = rtrim(rtrim(number_format((float)$m[1], 1), '0'), '.') . '%';
+        $confNum = (float)$m[1];
+    }
+    return [$label, $conf, $confNum];
+};
+
+// One row per scan. Same grouping idea as Disease Reports (rows sharing a reference_id are one
+// file); a scan with an empty reference_id is kept on its own instead of being merged with others.
+$scanGroups = [];
+$scanOrder  = [];
+$scan_q = mysqli_query($conn, "SELECT dc.case_id, dc.reference_id, dc.report_date, dc.description,
+            dc.farmer_id, dc.photo_evidence, dc.latitude, dc.longitude, dc.gps_accuracy,
+            $scanFarmerSelect
+            b.name AS brgy_name, d.disease_name
+        FROM disease_cases dc
+        LEFT JOIN barangays b ON dc.barangay_id = b.id
+        LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
+        $scanFarmerJoin
+        WHERE dc.`source` = 'scan' $scanBrgySql $scanDateSql
+        ORDER BY dc.report_date DESC, dc.case_id ASC
+        LIMIT $scanLimit");
+if ($scan_q) {
+    while ($r = mysqli_fetch_assoc($scan_q)) {
+        $key = trim((string)($r['reference_id'] ?? '')) !== '' ? (string)$r['reference_id'] : 'case-' . $r['case_id'];
+        if (!isset($scanGroups[$key])) {
+            $scanGroups[$key] = ['primary' => $r, 'diseases' => [], 'confs' => [], 'confnums' => [], 'case_ids' => []];
+            $scanOrder[] = $key;
+        }
+        [$pLabel, $pConf, $pNum] = $scanParse($r['description']);
+        $dn = trim((string)(($r['disease_name'] ?? '') !== '' ? $r['disease_name'] : ($pLabel ?? '')));
+        if ($dn !== '' && !in_array($dn, $scanGroups[$key]['diseases'], true)) {
+            $scanGroups[$key]['diseases'][] = $dn;
+        }
+        if ($pConf !== null) { $scanGroups[$key]['confs'][] = $pConf; }
+        if ($pNum !== null)  { $scanGroups[$key]['confnums'][] = $pNum; }
+        $scanGroups[$key]['case_ids'][] = (int)$r['case_id'];
+    }
+}
+?>
+
+<div class="bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl">
+    <div class="flex items-center justify-between gap-4 mb-6 flex-wrap">
+        <div class="flex items-center gap-4">
+            <div class="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0 text-2xl">&#128247;</div>
+            <div>
+                <h3 class="text-lg font-bold text-gray-900 tracking-tight">AI Scans</h3>
+                <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Photos the AI scanned and classified. Logged automatically, nothing to review here. Everything else is a manual report under Disease Reports.</p>
+            </div>
+        </div>
+        <div class="flex gap-3 shrink-0">
+            <a href="dashboard.php" class="btn-intel bg-emerald-50 border border-emerald-200 text-emerald-700 px-5 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest flex items-center gap-2">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+                Back to Map
+            </a>
+        </div>
+    </div>
+
+    <div id="scanPanel">
+
+    <!-- Search is instant/client-side; barangay + date submit as a normal GET (this view has no AJAX panel). -->
+    <div class="pt-1 flex items-center justify-between flex-wrap gap-4">
+        <div class="flex items-center gap-2.5 flex-wrap flex-1 min-w-0">
+            <div class="relative flex-1 min-w-[180px]">
+                <svg class="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg>
+                <input type="text" id="scanSearchInput" placeholder="Search by farmer, scan number, or disease..."
+                       class="w-full pl-9 pr-3 py-2.5 text-xs font-medium rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-300"
+                       oninput="filterScanRows()">
+            </div>
+
+            <form method="get" class="flex items-center gap-2 flex-wrap">
+                <input type="hidden" name="view" value="scans">
+
+                <select name="brgy_filter" onchange="this.form.submit()"
+                    class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 uppercase tracking-wide">
+                    <option value="0">All Barangays</option>
+                    <?php
+                    if ($allBarangays_q) {
+                        mysqli_data_seek($allBarangays_q, 0);
+                        while ($b = mysqli_fetch_assoc($allBarangays_q)):
+                    ?>
+                        <option value="<?= (int)$b['id'] ?>" <?= ($filterBarangayId == $b['id']) ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($b['name']) ?>
+                        </option>
+                    <?php endwhile; } ?>
+                </select>
+
+                <input type="date" name="date_from" value="<?= htmlspecialchars($filterDateFrom) ?>"
+                    class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5">
+                <span class="text-[10px] font-black text-gray-300 uppercase">to</span>
+                <input type="date" name="date_to" value="<?= htmlspecialchars($filterDateTo) ?>"
+                    class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5">
+
+                <button type="submit"
+                    class="btn-intel bg-gray-900 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest">
+                    Filter
+                </button>
+                <?php if ($scanHasFilters): ?>
+                <a href="?view=scans" class="text-[10px] font-black text-gray-400 hover:text-gray-600 uppercase underline">Clear</a>
+                <?php endif; ?>
+            </form>
+        </div>
+    </div>
+
+    <div class="divide-y divide-gray-50 mt-4">
+        <?php if (count($scanOrder) > 0):
+            foreach ($scanOrder as $__sref):
+                $sg        = $scanGroups[$__sref];
+                $srow      = $sg['primary'];
+                // Farmer: [FARMER:] tag if a row has one, else the farmers table (by farmer_id), else "Farmer #id".
+                $sFarmer   = extractFarmerName($srow['description'])
+                             ?? (!empty($srow['farmer_name_db']) ? $srow['farmer_name_db']
+                             : ((int)($srow['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$srow['farmer_id'] : '— Unassigned —'));
+                $sDiseases = !empty($sg['diseases']) ? implode(' + ', $sg['diseases']) : '—';
+                $sConf     = !empty($sg['confs']) ? $sg['confs'][0] : null;
+                $sConfNum  = !empty($sg['confnums']) ? $sg['confnums'][0] : null;
+                // Display bands only (same colors the modal uses): 80+ green, 60-79 amber, below 60 red.
+                $sConfClass = $sConfNum === null ? 'sev-low' : ($sConfNum >= 80 ? 'sev-low' : ($sConfNum >= 60 ? 'sev-moderate' : 'sev-high'));
+                $sIsTarget = $scanHighlightId && in_array($scanHighlightId, $sg['case_ids'], true);
+                // Scan photos are stored with their full path ("uploads/scan_results/..."); a bare file name lives in uploads/.
+                $sPhoto    = trim((string)($srow['photo_evidence'] ?? ''));
+                $sPhotoSrc = $sPhoto === '' ? '' : (strpos($sPhoto, '/') !== false ? $sPhoto : 'uploads/' . $sPhoto);
+                $sInitial  = preg_match('/\p{L}/u', $sFarmer, $__im) ? htmlspecialchars(strtoupper($__im[0])) : '?';
+                $sTs       = strtotime($srow['report_date']);
+                $scanModal = [
+                    'case_id'        => (int)$srow['case_id'],
+                    'reference_id'   => (string)($srow['reference_id'] ?? ''),
+                    'farmer'         => $sFarmer,
+                    'barangay'       => $srow['brgy_name'] ?? '— Unassigned —',
+                    'disease'        => $sDiseases,
+                    'confidence'     => $sConf,
+                    'confidence_pct' => $sConfNum,
+                    'date'           => date('M d, Y', $sTs),
+                    'time'           => date('g:i A', $sTs),
+                    'photo'          => $sPhotoSrc,
+                    'lat'            => ($srow['latitude']  ?? '') !== '' ? $srow['latitude']  : null,
+                    'lng'            => ($srow['longitude'] ?? '') !== '' ? $srow['longitude'] : null,
+                    'acc'            => ($srow['gps_accuracy'] ?? '') !== '' ? $srow['gps_accuracy'] : null,
+                ];
+                $sSearch   = strtolower(implode(' ', [
+                    $sFarmer, (string)($srow['reference_id'] ?? ''), $srow['brgy_name'] ?? '', $sDiseases,
+                ]));
+        ?>
+        <div class="dr-row scan-row" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
+             style="border-left:3px solid #10b981;<?= $sIsTarget ? 'background:#ecfdf5;' : '' ?>"
+             data-search="<?= htmlspecialchars($sSearch) ?>"
+             role="button" tabindex="0"
+             onclick='openScanModal(<?= htmlspecialchars(json_encode($scanModal), ENT_QUOTES, 'UTF-8') ?>)'
+             onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
+            <div class="flex items-center gap-3.5 min-w-0">
+                <?php if ($sPhotoSrc !== ''): ?>
+                <img src="<?= htmlspecialchars($sPhotoSrc) ?>" alt="Scan photo"
+                     class="farmer-avatar" style="object-fit:cover"
+                     onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+                <div class="farmer-avatar bg-emerald-100 items-center justify-center text-emerald-600 font-black text-sm rounded-xl" style="display:none"><?= $sInitial ?></div>
+                <?php else: ?>
+                <div class="farmer-avatar bg-emerald-100 flex items-center justify-center text-emerald-600 font-black text-sm rounded-xl shrink-0"><?= $sInitial ?></div>
+                <?php endif; ?>
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="font-bold text-gray-900 text-sm truncate"><?= htmlspecialchars($sFarmer) ?></span>
+                        <?php if (!empty($srow['reference_id'])): ?>
+                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-300"><?= htmlspecialchars($srow['reference_id']) ?></span>
+                        <?php endif; ?>
+                        <span class="dr-type-chip"><?= htmlspecialchars($sDiseases) ?></span>
+                    </div>
+                    <p class="text-xs text-gray-500 font-medium truncate">
+                        <?= htmlspecialchars($srow['brgy_name'] ?? '— Unassigned —') ?> &nbsp;&bull;&nbsp; <?= htmlspecialchars(date('M d, Y', strtotime($srow['report_date']))) ?> &middot; <?= htmlspecialchars(date('g:i A', strtotime($srow['report_date']))) ?>
+                    </p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+                <?php if ($sConf !== null): ?>
+                <span class="sev-badge <?= $sConfClass ?>"><?= htmlspecialchars($sConf) ?> confidence</span>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php endforeach; else: ?>
+            <div class="dr-empty">
+                <p class="text-xs font-bold uppercase tracking-widest">
+                    <?php if ($scanHasFilters): ?>
+                        No AI scans match these filters.
+                    <?php else: ?>
+                        No AI scans yet. They appear here when a case is saved with source = scan.
+                    <?php endif; ?>
+                </p>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <div id="scanSearchEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No scans match your search</p></div>
+
+    <?php if (count($scanOrder) >= $scanLimit): ?>
+    <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest pt-4 text-center">Showing the latest <?= (int)$scanLimit ?> scans. Use the barangay and date filters to narrow down.</p>
+    <?php endif; ?>
+
+    </div><!-- /#scanPanel -->
+</div>
+
+<!-- ═══ AI SCAN DETAIL MODAL — opens when a scan row is clicked (openScanModal below).
+     Same overlay/centering pattern as the PDF preview modal. ═══ -->
+<div id="scanModal" class="hidden fixed inset-0 z-[150]" style="background:rgba(15,23,42,0.72);backdrop-filter:blur(4px);" onclick="if(event.target===this) closeScanModal()">
+    <div role="dialog" aria-modal="true" aria-labelledby="scanModalTitle" style="
+        position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+        background:#ffffff;border:1px solid #e2e8f0;border-radius:24px;
+        width:min(760px,94vw);max-height:92vh;overflow:auto;
+        box-shadow:0 30px 70px rgba(0,0,0,0.4);animation:reportPopIn .22s ease;">
+
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:20px 24px 8px;">
+            <div style="min-width:0;">
+                <p style="color:#10b981;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 2px;">AI Scan</p>
+                <h3 id="scanModalTitle" style="color:#0f172a;font-size:1.15rem;font-weight:900;margin:0;">—</h3>
+                <p id="scanModalRef" style="color:#94a3b8;font-size:0.7rem;font-weight:700;letter-spacing:0.05em;margin:2px 0 0;"></p>
+            </div>
+            <button type="button" id="scanModalClose" onclick="closeScanModal()" aria-label="Close"
+                style="flex-shrink:0;background:rgba(15,23,42,0.06);border:1px solid rgba(15,23,42,0.1);color:#64748b;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:1rem;line-height:1;">&#10005;</button>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px;padding:12px 24px 24px;">
+
+            <div>
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:16px;min-height:240px;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+                    <img id="scanModalPhoto" alt="Scan photo" style="display:none;width:100%;max-height:340px;object-fit:contain;cursor:zoom-in;" onclick="window.open(this.src,'_blank')">
+                    <p id="scanModalNoPhoto" style="color:#94a3b8;font-size:0.72rem;font-weight:700;margin:0;padding:24px;text-align:center;">No photo available</p>
+                </div>
+                <p id="scanModalPhotoHint" style="display:none;color:#94a3b8;font-size:10px;font-weight:700;margin:6px 0 0;text-align:center;">Click the photo to open it full size</p>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:14px;min-width:0;">
+
+                <div style="border:1px solid #e2e8f0;border-radius:16px;padding:14px 16px;">
+                    <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 6px;">AI result</p>
+                    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
+                        <span id="scanModalDisease" style="color:#0f172a;font-size:1.05rem;font-weight:900;"></span>
+                        <span id="scanModalConf" style="font-size:1.05rem;font-weight:900;"></span>
+                    </div>
+                    <div style="height:8px;border-radius:999px;background:#e5e7eb;margin-top:10px;overflow:hidden;">
+                        <div id="scanModalBar" style="height:100%;width:0;border-radius:999px;transition:width .3s ease;"></div>
+                    </div>
+                    <p id="scanModalBand" style="font-size:11px;font-weight:700;margin:6px 0 0;"></p>
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 16px;">
+                    <div style="min-width:0;">
+                        <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 2px;">Farmer</p>
+                        <p id="scanModalFarmer" style="color:#0f172a;font-size:0.8rem;font-weight:700;margin:0;word-break:break-word;"></p>
+                    </div>
+                    <div style="min-width:0;">
+                        <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 2px;">Barangay</p>
+                        <p id="scanModalBrgy" style="color:#0f172a;font-size:0.8rem;font-weight:700;margin:0;word-break:break-word;"></p>
+                    </div>
+                    <div style="min-width:0;">
+                        <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 2px;">Scanned on</p>
+                        <p id="scanModalDate" style="color:#0f172a;font-size:0.8rem;font-weight:700;margin:0;"></p>
+                    </div>
+                    <div style="min-width:0;">
+                        <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 2px;">Case ID</p>
+                        <p id="scanModalCase" style="color:#0f172a;font-size:0.8rem;font-weight:700;margin:0;"></p>
+                    </div>
+                </div>
+
+                <div id="scanModalGeoWrap" style="display:none;border-top:1px solid #f1f5f9;padding-top:12px;">
+                    <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 2px;">Location</p>
+                    <p id="scanModalGeo" style="color:#0f172a;font-size:0.8rem;font-weight:700;margin:0;"></p>
+                    <a id="scanModalMap" href="#" target="_blank" rel="noopener" style="display:inline-block;margin-top:4px;color:#059669;font-size:0.7rem;font-weight:800;text-decoration:underline;">Open in Maps</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Instant client-side search across the scans already loaded on this page.
+function filterScanRows() {
+    var panel = document.getElementById('scanPanel');
+    if (!panel) return;
+    var input = document.getElementById('scanSearchInput');
+    var term  = ((input && input.value) || '').trim().toLowerCase();
+    var visible = 0;
+    panel.querySelectorAll('.scan-row').forEach(function (row) {
+        var match = !term || (row.dataset.search || '').indexOf(term) !== -1;
+        row.style.display = match ? '' : 'none';
+        if (match) visible++;
+    });
+    var empty = document.getElementById('scanSearchEmpty');
+    if (empty) empty.classList.toggle('hidden', !(term && visible === 0));
+}
+
+// ── AI scan detail modal ──
+function openScanModal(d) {
+    var modal = document.getElementById('scanModal');
+    if (!modal) return;
+    window.__scanLastRow = document.activeElement;
+
+    function txt(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; }
+    txt('scanModalTitle',   d.disease || 'AI Scan');
+    txt('scanModalRef',     d.reference_id || ('Case #' + d.case_id));
+    txt('scanModalDisease', d.disease || '—');
+    txt('scanModalFarmer',  d.farmer || '—');
+    txt('scanModalBrgy',    d.barangay || '—');
+    txt('scanModalDate',    (d.date || '') + ' · ' + (d.time || ''));
+    txt('scanModalCase',    '#' + d.case_id);
+
+    // Confidence: number + bar + band. Bands are display-only: 80+ high, 60-79 medium, below 60 low.
+    var pct = (d.confidence_pct === null || d.confidence_pct === undefined) ? null : parseFloat(d.confidence_pct);
+    var bar = document.getElementById('scanModalBar'), conf = document.getElementById('scanModalConf'), band = document.getElementById('scanModalBand');
+    if (pct === null || isNaN(pct)) {
+        conf.textContent = '—'; conf.style.color = '#94a3b8';
+        bar.style.width = '0'; band.textContent = 'No confidence recorded'; band.style.color = '#94a3b8';
+    } else {
+        var level = pct >= 80 ? ['#10b981', '#047857', 'High confidence']
+                  : pct >= 60 ? ['#f59e0b', '#b45309', 'Medium confidence']
+                              : ['#ef4444', '#b91c1c', 'Low confidence'];
+        conf.textContent = d.confidence || (pct + '%'); conf.style.color = level[1];
+        bar.style.background = level[0]; bar.style.width = '0';
+        setTimeout(function () { bar.style.width = Math.max(0, Math.min(100, pct)) + '%'; }, 30);
+        band.textContent = level[2]; band.style.color = level[1];
+    }
+
+    // Photo (falls back to a placeholder if the file is missing)
+    var img = document.getElementById('scanModalPhoto'), noPhoto = document.getElementById('scanModalNoPhoto'), hint = document.getElementById('scanModalPhotoHint');
+    function showNoPhoto() { img.style.display = 'none'; noPhoto.style.display = 'block'; hint.style.display = 'none'; }
+    if (d.photo) {
+        img.onerror = showNoPhoto;
+        img.onload  = function () { img.style.display = 'block'; noPhoto.style.display = 'none'; hint.style.display = 'block'; };
+        img.src = d.photo;
+    } else {
+        img.removeAttribute('src'); showNoPhoto();
+    }
+
+    // Location (only when the scan has coordinates)
+    var geoWrap = document.getElementById('scanModalGeoWrap');
+    if (d.lat !== null && d.lat !== undefined && d.lng !== null && d.lng !== undefined) {
+        var g = parseFloat(d.lat).toFixed(6) + ', ' + parseFloat(d.lng).toFixed(6);
+        if (d.acc !== null && d.acc !== undefined && d.acc !== '') { g += '  (±' + parseFloat(d.acc).toFixed(1) + ' m)'; }
+        txt('scanModalGeo', g);
+        document.getElementById('scanModalMap').href = 'https://www.google.com/maps?q=' + encodeURIComponent(d.lat + ',' + d.lng);
+        geoWrap.style.display = 'block';
+    } else {
+        geoWrap.style.display = 'none';
+    }
+
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+    var closeBtn = document.getElementById('scanModalClose');
+    if (closeBtn) closeBtn.focus();
+}
+
+function closeScanModal() {
+    var modal = document.getElementById('scanModal');
+    if (!modal || modal.classList.contains('hidden')) return;
+    modal.classList.add('hidden');
+    document.body.style.overflow = '';
+    var last = window.__scanLastRow;
+    if (last && typeof last.focus === 'function') { last.focus(); }
+}
+
+document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { closeScanModal(); }
+});
+
+// Arriving from a dashboard map link: scroll to that scan and open its details.
+window.addEventListener('DOMContentLoaded', function () {
+    var t = document.getElementById('scanTargetRow');
+    if (t) { t.scrollIntoView({ behavior: 'smooth', block: 'center' }); t.click(); }
+});
+</script>
+<?php endif; // end $view === 'scans' ?>
 
 <?php if ($view === 'farm'): ?>
 <?php render_planting_harvesting_section($conn); ?>
