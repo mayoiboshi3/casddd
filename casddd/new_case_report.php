@@ -31,6 +31,30 @@
  * ----------------------------------------------------------------------
  */
 
+// ── DATABASE CONNECTION GUARD ───────────────────────────────────────────
+// This file is a partial that reports.php pulls in with require_once. It uses
+// $conn (schema checks + POST handlers) but never defined it — it relied on
+// reports.php having already loaded src/db_config.php. This guard makes the
+// file safe regardless of how it is loaded:
+//   1. $conn already in scope            -> nothing to do (normal case)
+//   2. $conn exists in the global scope  -> pull it in (e.g. file included
+//                                           from inside a function)
+//   3. otherwise                         -> load db_config.php ourselves
+// The @var line also stops IDEs (Intelephense / PhpStorm) from flagging
+// "Undefined variable $conn" on this file.
+/** @var mysqli $conn */
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    if (isset($GLOBALS['conn']) && $GLOBALS['conn'] instanceof mysqli) {
+        $conn = $GLOBALS['conn'];
+    } else {
+        require_once __DIR__ . '/src/db_config.php';
+    }
+}
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    http_response_code(500);
+    die('Database connection ($conn) is not available in ' . basename(__FILE__) . '.');
+}
+
 // Personnel log helpers — who is signed in, so the case records its creator.
 require_once __DIR__ . '/personnel_log.php';
 
