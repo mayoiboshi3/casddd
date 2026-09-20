@@ -33,6 +33,11 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
     die('Database connection ($conn) is not available in ' . basename(__FILE__) . '.');
 }
 
+// Personnel log helpers: who is signed in, and the Created / Verified / Rejected log entries.
+// Needs these columns on planting_harvesting_reports (added manually in the database):
+//   created_by INT, verified_by INT, rejected_by INT, rejected_at DATETIME
+require_once __DIR__ . '/personnel_log.php';
+
 // --- SELF-HEALING SCHEMA: 'source' column on planting_harvesting_reports ---
 // Lets us tell farmer-submitted reports apart from ones a staff member typed
 // in manually via the "+ Add Report" button below.
@@ -86,12 +91,13 @@ foreach ($ph_new_columns as $ph_col_name => $ph_col_def) {
 }
 
 // One-way status flow, same idea as $STATUS_FLOW above for disease_cases —
-// once verified, a report is locked. Rejecting a pending report deletes it
-// outright instead of moving it into a "rejected" state, so the only
-// statuses that actually persist are Pending and Verified.
+// once a report is verified or rejected it is locked. Rejected reports are KEPT
+// (status 'rejected', with the reviewer's reason saved in `remarks`) so they can
+// still be viewed later, exactly like rejected disease cases.
 $PH_STATUS_FLOW = [
     'pending'  => ['pending', 'verified', 'rejected'],
     'verified' => ['verified'],
+    'rejected' => ['rejected'],
 ];
 
 // 1. HANDLE "+ ADD REPORT" (manual, staff-entered)
@@ -114,6 +120,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
     // an empty string is rejected by MySQL in strict mode and the INSERT fails.
     // 'received' is the column default and is treated as Pending everywhere below.
     $status = 'received';
+
+    // Personnel log: the staff member logging this report by hand (NULL = could not be determined)
+    $created_by    = (int) personnel_log_current_user_id($conn);
+    $createdBySql  = $created_by > 0 ? $created_by : 'NULL';
 
     $validReportTypes = ['planting', 'harvesting', 'damage'];
     $validCropTypes   = ['yellow_corn', 'white_corn', 'cassava'];
@@ -177,15 +187,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
         if ($isDamage) {
             $insertQuery = "INSERT INTO planting_harvesting_reports
                 (reference_id, farmer_id, report_type, source, description, photo, latitude, longitude,
-                 privacy_consent, status, remarks, submitted_at, verified_at, created_at)
+                 privacy_consent, status, remarks, created_by, submitted_at, verified_at, created_at)
                 VALUES ('$reference_id', $farmer_id, 'damage', 'staff', '$description', $photo_db_value, $lat_db_value, $lng_db_value,
-                 1, '$status', '$remarks', NOW(), NULL, NOW())";
+                 1, '$status', '$remarks', $createdBySql, NOW(), NULL, NOW())";
         } else {
             $insertQuery = "INSERT INTO planting_harvesting_reports
                 (reference_id, farmer_id, report_type, source, crop_type, variety, planting_stage,
-                 area_hectares, photo, privacy_consent, status, remarks, submitted_at, verified_at, created_at)
+                 area_hectares, photo, privacy_consent, status, remarks, created_by, submitted_at, verified_at, created_at)
                 VALUES ('$reference_id', $farmer_id, '$report_type', 'staff', '$crop_type', '$variety', '$planting_stage',
-                 $area_hectares, $photo_db_value, 1, '$status', '$remarks', NOW(), NULL, NOW())";
+                 $area_hectares, $photo_db_value, 1, '$status', '$remarks', $createdBySql, NOW(), NULL, NOW())";
         }
 
         if (mysqli_query($conn, $insertQuery)) {
@@ -210,16 +220,18 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
     }
 }
 
-// 2. HANDLE STATUS UPDATE from the "Review Report" popup (Pending -> Verified, or delete on Reject)
-// Rewritten to be a real, checked state machine instead of trusting the
-// request: we re-check the row's live status right before acting (so two
-// people reviewing the same report at once can't both "succeed"), we check
-// every query's actual result before reporting success, and -- when the
-// request comes from the Review modal's JS (fetch/AJAX) -- we answer with
-// JSON so the page can update instantly instead of a full reload. A normal
-// (non-JS) form POST still falls back to the old redirect behavior, so this
-// keeps working — for any report type, farmer- or staff-submitted alike —
-// even if JavaScript is unavailable.
+// 2. HANDLE STATUS UPDATE from the "Review Report" popup (Pending -> Verified, or Pending -> Rejected)
+// Rejecting no longer deletes anything: the report is KEPT with status 'rejected', the reviewer's
+// REQUIRED reason saved in `remarks`, and who/when in rejected_by / rejected_at — so it can be
+// viewed later from the Rejected filter, the same way rejected disease cases work. Verifying
+// records verified_by / verified_at. Once verified or rejected, a report is locked.
+//
+// This is a real, checked state machine: we re-check the row's live status right before acting
+// (so two people reviewing the same report at once can't both "succeed"), we check every
+// query's actual result before reporting success, and -- when the request comes from the Review
+// modal's JS (fetch/AJAX) -- we answer with JSON (including the refreshed report) so the page
+// can update instantly instead of a full reload. A normal (non-JS) form POST still falls back
+// to the old redirect behavior.
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_ph_report'])) {
     $is_ajax = (
         (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
@@ -228,11 +240,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_ph_report'])) {
 
     $ph_report_id = (int)($_POST['ph_report_id_hidden'] ?? 0);
     $new_status   = mysqli_real_escape_string($conn, $_POST['ph_new_status'] ?? '');
-    $remarks      = mysqli_real_escape_string($conn, trim($_POST['ph_remarks_update'] ?? ''));
+    $remarks_raw  = trim($_POST['ph_remarks_update'] ?? '');
+    $remarks      = mysqli_real_escape_string($conn, $remarks_raw);
 
-    // 'gone' tells the front-end the report is no longer there for ANY reason
-    // (already rejected/deleted, already verified by someone else, bad id) so
-    // it can drop the row locally instead of getting stuck on a stale one.
+    // 'gone' tells the front-end the report is no longer there (bad id, removed) so it can
+    // drop the row locally instead of getting stuck on a stale one.
     $result = ['success' => false, 'gone' => false, 'report_id' => $ph_report_id, 'message' => 'Something went wrong. Please try again.'];
 
     if ($ph_report_id <= 0) {
@@ -245,40 +257,51 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_ph_report'])) {
 
         if (!$cur_row) {
             $result['gone']    = true;
-            $result['message'] = 'This report no longer exists — it may have already been reviewed.';
+            $result['message'] = 'This report no longer exists — it may have been removed.';
         } else {
             $raw_status  = $cur_row['status'] ?? '';
             $cur_status  = ($raw_status === '' || $raw_status === 'received') ? 'pending' : $raw_status;
             $allowedNext = $PH_STATUS_FLOW[$cur_status] ?? [];
 
+            // Personnel log: who is doing this
+            $actorId  = personnel_log_current_user_id($conn);
+            $actorSql = $actorId > 0 ? (int)$actorId : 'NULL';
+            // Only ever change a report that is STILL pending in the database right now
+            $stillPending = "(status = 'received' OR status = '' OR status IS NULL)";
+
             if (!in_array($new_status, $allowedNext, true)) {
-                $result['message'] = ($cur_status === 'verified')
-                    ? 'This report is already finalized and can no longer be changed.'
-                    : 'A pending report can only be Verified, or Rejected (which removes it).';
-                // Already verified/locked reports are still "present" -- don't
-                // tell the front-end to remove the row, just refuse the change.
-                $result['gone'] = ($cur_status !== 'pending' && $cur_status !== 'verified');
+                $result['message'] = 'This report is already finalized and can no longer be changed.';
             } elseif ($new_status === 'rejected') {
-                // Rejected reports are not kept — the record is deleted outright
-                // rather than saved with a "rejected" status. We only call this a
-                // success once the DELETE actually removed a row.
-                $del_ok = mysqli_query($conn, "DELETE FROM planting_harvesting_reports WHERE report_id = $ph_report_id LIMIT 1");
-                if ($del_ok && mysqli_affected_rows($conn) > 0) {
-                    $result = ['success' => true, 'deleted' => true, 'gone' => true, 'report_id' => $ph_report_id,
-                               'message' => 'Report rejected and removed.'];
+                if ($remarks_raw === '') {
+                    $result['message'] = 'Please enter the reason for rejecting this report.';
                 } else {
-                    $result['gone']    = true;
-                    $result['message'] = 'Could not reject this report — it may have already been removed. Error: ' . mysqli_error($conn);
+                    $rej_ok = mysqli_query($conn, "UPDATE planting_harvesting_reports
+                        SET status = 'rejected', remarks = '$remarks', rejected_by = $actorSql, rejected_at = NOW(), updated_at = NOW()
+                        WHERE report_id = $ph_report_id AND $stillPending");
+                    if ($rej_ok && mysqli_affected_rows($conn) > 0) {
+                        $result = ['success' => true, 'gone' => false, 'report_id' => $ph_report_id,
+                                   'new_status' => 'rejected', 'remarks' => $remarks_raw,
+                                   'report'  => ph_fetch_report_payload($conn, $ph_report_id),
+                                   'message' => 'Report rejected. It was moved to the Rejected list.'];
+                    } else {
+                        $result['message'] = 'Could not reject this report — it may have already been reviewed.'
+                            . ($rej_ok ? '' : ' Error: ' . mysqli_error($conn));
+                    }
                 }
             } else {
-                $verifiedSql = ($new_status === 'verified') ? ", verified_at = NOW()" : "";
-                $upd_ok = mysqli_query($conn, "UPDATE planting_harvesting_reports SET status = '$new_status', remarks = '$remarks', updated_at = NOW() $verifiedSql WHERE report_id = $ph_report_id");
-                if ($upd_ok) {
-                    $result = ['success' => true, 'deleted' => false, 'gone' => false, 'report_id' => $ph_report_id,
-                               'new_status' => $new_status, 'remarks' => $remarks,
-                               'message' => $new_status === 'verified' ? 'Report verified.' : 'Report updated.'];
+                $isVerify = ($new_status === 'verified');
+                $setSql   = $isVerify
+                    ? "status = 'verified', remarks = '$remarks', verified_by = $actorSql, verified_at = NOW(), updated_at = NOW()"
+                    : "remarks = '$remarks', updated_at = NOW()";
+                $upd_ok = mysqli_query($conn, "UPDATE planting_harvesting_reports SET $setSql WHERE report_id = $ph_report_id AND $stillPending");
+                if ($upd_ok && (!$isVerify || mysqli_affected_rows($conn) > 0)) {
+                    $result = ['success' => true, 'gone' => false, 'report_id' => $ph_report_id,
+                               'new_status' => $isVerify ? 'verified' : 'pending', 'remarks' => $remarks_raw,
+                               'report'  => ph_fetch_report_payload($conn, $ph_report_id),
+                               'message' => $isVerify ? 'Report verified successfully.' : 'Report updated successfully.'];
                 } else {
-                    $result['message'] = 'Could not update this report. Error: ' . mysqli_error($conn);
+                    $result['message'] = 'Could not update this report — it may have already been reviewed.'
+                        . ($upd_ok ? '' : ' Error: ' . mysqli_error($conn));
                 }
             }
         }
@@ -301,6 +324,54 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_ph_report'])) {
         echo "<script>alert('$safeMsg'); window.location='reports.php#ph-section';</script>";
     }
     exit;
+}
+
+// ── One place that builds a farm report's row for the browser (list, "just added" popup, and the
+// refreshed report after Accept/Reject), including its personnel log.
+function ph_report_select_sql() {
+    return "SELECT phr.*, f.farmer_name, f.profile_farmers AS farmer_photo, b.name AS brgy_name,
+                   uc.full_name AS creator_name,  uc.role AS creator_role,
+                   uv.full_name AS verifier_name, uv.role AS verifier_role,
+                   ur.full_name AS rejecter_name, ur.role AS rejecter_role
+            FROM planting_harvesting_reports phr
+            LEFT JOIN farmers f    ON phr.farmer_id  = f.farmer_id
+            LEFT JOIN barangays b  ON f.barangay_id  = b.id
+            LEFT JOIN users uc     ON phr.created_by  = uc.user_id
+            LEFT JOIN users uv     ON phr.verified_by = uv.user_id
+            LEFT JOIN users ur     ON phr.rejected_by = ur.user_id";
+}
+function ph_report_payload($r) {
+    return [
+        'report_id'       => (int)$r['report_id'],
+        'reference_id'    => $r['reference_id'],
+        'farmer_name'     => $r['farmer_name'] ?: '— Unassigned —',
+        'farmer_photo'    => $r['farmer_photo'],
+        'brgy_name'       => $r['brgy_name'] ?? '',
+        'report_type'     => $r['report_type'],
+        'source'          => $r['source'],
+        'crop_type'       => $r['crop_type'],
+        'variety'         => $r['variety'],
+        'planting_stage'  => $r['planting_stage'],
+        'area_hectares'   => $r['area_hectares'],
+        'description'     => $r['description'] ?? null,
+        'photo'           => $r['photo'] ?? null,
+        'latitude'        => $r['latitude'] ?? null,
+        'longitude'       => $r['longitude'] ?? null,
+        'gps_accuracy'    => $r['gps_accuracy'] ?? null,
+        'altitude'        => $r['altitude'] ?? null,
+        'privacy_consent' => (int)$r['privacy_consent'],
+        'status'          => (in_array($r['status'], ['', 'received'], true) || $r['status'] === null) ? 'pending' : $r['status'],
+        'remarks'         => $r['remarks'],
+        'submitted_at'    => $r['submitted_at'],
+        'verified_at'     => $r['verified_at'] ?? null,
+        'rejected_at'     => $r['rejected_at'] ?? null,
+        'personnel'       => personnel_log_build_farm($r),
+    ];
+}
+function ph_fetch_report_payload($conn, $report_id) {
+    $q   = mysqli_query($conn, ph_report_select_sql() . " WHERE phr.report_id = " . (int)$report_id . " LIMIT 1");
+    $row = $q ? mysqli_fetch_assoc($q) : null;
+    return $row ? ph_report_payload($row) : null;
 }
 
 // Helpers: display labels/badges for crop type + report type
@@ -353,52 +424,17 @@ function ph_status_label($status) {
 function render_planting_harvesting_section($conn) {
     global $PH_STATUS_FLOW;
 
-    // Stats — an empty-string (or legacy "received") status in the DB counts
-    // as "pending". Rejected reports are deleted on rejection, so any legacy
-    // rejected rows left over from before that change are excluded here.
+    // Stats — an empty-string (or legacy "received") status in the DB counts as "pending".
     $ph_stats_q = mysqli_query($conn, "SELECT COUNT(*) AS total,
         COUNT(CASE WHEN status = 'received' OR status = '' OR status IS NULL THEN 1 END) AS pending,
-        COUNT(CASE WHEN status = 'verified' THEN 1 END) AS verified
-        FROM planting_harvesting_reports WHERE status != 'rejected' OR status IS NULL");
-    $ph_stats = mysqli_fetch_assoc($ph_stats_q) ?: ['total' => 0, 'pending' => 0, 'verified' => 0];
+        COUNT(CASE WHEN status = 'verified' THEN 1 END) AS verified,
+        COUNT(CASE WHEN status = 'rejected' THEN 1 END) AS rejected
+        FROM planting_harvesting_reports");
+    $ph_stats = mysqli_fetch_assoc($ph_stats_q) ?: ['total' => 0, 'pending' => 0, 'verified' => 0, 'rejected' => 0];
 
     // If we just redirected back from "+ Add Report", pull that one report's
     // full data so we can show a "View Report" button for it right away.
-    $ph_new_report = null;
-    if (!empty($_GET['ph_new'])) {
-        $ph_new_id = (int)$_GET['ph_new'];
-        $pn_q = mysqli_query($conn, "SELECT phr.*, f.farmer_name, f.profile_farmers AS farmer_photo, b.name AS brgy_name
-                     FROM planting_harvesting_reports phr
-                     LEFT JOIN farmers f    ON phr.farmer_id  = f.farmer_id
-                     LEFT JOIN barangays b  ON f.barangay_id  = b.id
-                     WHERE phr.report_id = $ph_new_id LIMIT 1");
-        if ($pn_q && $pn_row = mysqli_fetch_assoc($pn_q)) {
-            $ph_new_report = [
-                'report_id'       => (int)$pn_row['report_id'],
-                'reference_id'    => $pn_row['reference_id'],
-                'farmer_name'     => $pn_row['farmer_name'] ?: '— Unassigned —',
-                'farmer_photo'    => $pn_row['farmer_photo'],
-                'brgy_name'       => $pn_row['brgy_name'] ?? '—',
-                'report_type'     => $pn_row['report_type'],
-                'source'          => $pn_row['source'],
-                'crop_type'       => $pn_row['crop_type'],
-                'variety'         => $pn_row['variety'],
-                'planting_stage'  => $pn_row['planting_stage'],
-                'area_hectares'   => $pn_row['area_hectares'],
-                'description'     => $pn_row['description'] ?? null,
-                'photo'           => $pn_row['photo'] ?? null,
-                'latitude'        => $pn_row['latitude'] ?? null,
-                'longitude'       => $pn_row['longitude'] ?? null,
-                'gps_accuracy'    => $pn_row['gps_accuracy'] ?? null,
-                'altitude'        => $pn_row['altitude'] ?? null,
-                'privacy_consent' => (int)$pn_row['privacy_consent'],
-                'status'          => (in_array($pn_row['status'], ['', 'received'], true) || $pn_row['status'] === null) ? 'pending' : $pn_row['status'],
-                'remarks'         => $pn_row['remarks'],
-                'submitted_at'    => $pn_row['submitted_at'],
-                'verified_at'     => $pn_row['verified_at'],
-            ];
-        }
-    }
+    $ph_new_report = !empty($_GET['ph_new']) ? ph_fetch_report_payload($conn, (int)$_GET['ph_new']) : null;
 
     // Farmers, for the "+ Add Report" farmer picker
     $ph_farmers = [];
@@ -407,43 +443,14 @@ function render_planting_harvesting_section($conn) {
                                           ORDER BY f.farmer_name ASC");
     if ($ph_farmers_q) { while ($f = mysqli_fetch_assoc($ph_farmers_q)) { $ph_farmers[] = $f; } }
 
-    // Full list of every non-rejected report — feeds the single "Planting &
-    // Harvesting" popup. Rejected reports are deleted on rejection, so this
-    // effectively only ever surfaces Pending and Verified reports (any
-    // legacy rejected rows from before that change are filtered out here).
+    // Full list of every report — INCLUDING rejected ones, which are kept now (with the
+    // reviewer's reason in `remarks`) and shown under the Rejected filter.
     $ph_all_rows = [];
-    $ph_all_q = mysqli_query($conn, "SELECT phr.*, f.farmer_name, f.profile_farmers AS farmer_photo, b.name AS brgy_name
-                 FROM planting_harvesting_reports phr
-                 LEFT JOIN farmers f    ON phr.farmer_id  = f.farmer_id
-                 LEFT JOIN barangays b  ON f.barangay_id  = b.id
-                 WHERE phr.status != 'rejected' OR phr.status IS NULL
+    $ph_all_q = mysqli_query($conn, ph_report_select_sql() . "
                  ORDER BY phr.submitted_at DESC, phr.report_id DESC");
     if ($ph_all_q) {
         while ($ar = mysqli_fetch_assoc($ph_all_q)) {
-            $ph_all_rows[] = [
-                'report_id'      => (int)$ar['report_id'],
-                'reference_id'   => $ar['reference_id'],
-                'farmer_name'    => $ar['farmer_name'] ?: '— Unassigned —',
-                'farmer_photo'   => $ar['farmer_photo'],
-                'brgy_name'      => $ar['brgy_name'] ?? '—',
-                'report_type'    => $ar['report_type'],
-                'source'         => $ar['source'],
-                'crop_type'      => $ar['crop_type'],
-                'variety'        => $ar['variety'],
-                'planting_stage' => $ar['planting_stage'],
-                'area_hectares'  => $ar['area_hectares'],
-                'description'    => $ar['description'] ?? null,
-                'photo'          => $ar['photo'] ?? null,
-                'latitude'       => $ar['latitude'] ?? null,
-                'longitude'      => $ar['longitude'] ?? null,
-                'gps_accuracy'   => $ar['gps_accuracy'] ?? null,
-                'altitude'       => $ar['altitude'] ?? null,
-                'privacy_consent'=> (int)$ar['privacy_consent'],
-                'status'         => (in_array($ar['status'], ['', 'received'], true) || $ar['status'] === null) ? 'pending' : $ar['status'],
-                'remarks'        => $ar['remarks'],
-                'submitted_at'   => $ar['submitted_at'],
-                'verified_at'    => $ar['verified_at'],
-            ];
+            $ph_all_rows[] = ph_report_payload($ar);
         }
     }
     ?>
@@ -597,12 +604,40 @@ function render_planting_harvesting_section($conn) {
                     </div>
                 </div>
 
+                <!-- Personnel Log — who created / verified / rejected this report.
+                     Filled by renderPersonnelLog() (review.php) from data.personnel. -->
+                <div id="phv_personnel_wrap" style="display:none;background:rgba(99,102,241,0.05);border:1px solid rgba(99,102,241,0.18);border-radius:12px;padding:12px 16px;margin-bottom:16px;">
+                    <div style="color:#6366f1;font-size:0.6rem;font-weight:900;text-transform:uppercase;letter-spacing:0.15em;margin-bottom:10px;">🧾 Personnel Log</div>
+                    <div id="phv_personnel_list" style="display:flex;flex-direction:column;gap:10px;"></div>
+                </div>
+
                 <form method="POST" id="phv_form">
                     <input type="hidden" name="update_ph_report" value="1">
                     <input type="hidden" name="ph_report_id_hidden" id="phv_report_id">
 
-                    <span class="field-label">Remarks</span>
-                    <textarea name="ph_remarks_update" id="phv_remarks" rows="3" class="field-input mb-4" placeholder="Notes for this report..."></textarea>
+                    <div id="phv_remarks_wrap">
+                        <span class="field-label">Remarks</span>
+                        <textarea name="ph_remarks_update" id="phv_remarks" rows="3" class="field-input mb-4" placeholder="Notes for this report..."></textarea>
+                    </div>
+
+                    <!-- Rejected report: the saved reason, read-only (like the disease popup's Office Notes) -->
+                    <div id="phv_rejection_view" class="hidden mb-4 rounded-xl border border-rose-100 bg-rose-50/60 p-4">
+                        <span class="text-[10px] font-black uppercase tracking-widest text-rose-600">Reason for Rejection</span>
+                        <p id="phv_rejection_view_text" class="mt-1 text-sm font-semibold text-gray-800" style="white-space:pre-wrap;"></p>
+                    </div>
+
+                    <!-- Rejection reason — appears (and is REQUIRED) once the reviewer clicks Reject -->
+                    <div id="phv_reject_reason_wrap" class="hidden mb-4">
+                        <label for="phv_reject_reason" class="block text-[10px] font-black uppercase tracking-widest text-rose-700 mb-1.5">
+                            Reason for Rejection <span class="text-rose-500">*</span>
+                        </label>
+                        <textarea id="phv_reject_reason" rows="3" class="field-input"
+                                  placeholder="Explain why this report is being rejected (e.g. duplicate, unclear photo, wrong farmer)"></textarea>
+                        <div class="flex items-center justify-between mt-1.5 gap-3">
+                            <p class="text-[9px] font-semibold text-gray-400">Required. Saved with the report so it can be reviewed later.</p>
+                            <button type="button" onclick="phResetRejectReason()" class="text-[10px] font-bold uppercase tracking-widest text-gray-400 hover:text-gray-700 shrink-0">Cancel</button>
+                        </div>
+                    </div>
 
                     <p id="phv_error" class="hidden text-center text-[10px] font-bold text-rose-600 mb-2"></p>
 
@@ -616,7 +651,7 @@ function render_planting_harvesting_section($conn) {
                             Reject
                         </button>
                     </div>
-                    <p class="text-center text-[9px] font-semibold text-gray-400 mt-2">Rejecting a report deletes it permanently — it will not be saved.</p>
+                    <p class="text-center text-[9px] font-semibold text-gray-400 mt-2">Rejecting requires a reason. Rejected reports are kept and can be viewed under the Rejected filter.</p>
                     <p id="phv_locked_note" class="hidden text-center text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-2 flex items-center justify-center gap-1.5">
                         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
                         This report is locked — status already finalized
@@ -992,12 +1027,14 @@ function render_planting_harvesting_section($conn) {
     const phAllReports = <?= json_encode($ph_all_rows) ?>;
     const PH_STATUS_BADGE = {
         verified: 'bg-blue-100 text-blue-700',
-        pending: 'bg-purple-100 text-purple-700'
+        pending: 'bg-purple-100 text-purple-700',
+        rejected: 'bg-rose-100 text-rose-700'
     };
 
     const PH_STATUS_ICON = {
         verified: { bg: '#dbeafe', fg: '#1d4ed8', path: 'M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
-        pending: { bg: '#ede9fe', fg: '#6d28d9', path: 'M12 6v6l4 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z' }
+        pending: { bg: '#ede9fe', fg: '#6d28d9', path: 'M12 6v6l4 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
+        rejected: { bg: '#ffe4e6', fg: '#be123c', path: 'M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z' }
     };
     const PH_CROP_LABEL = { yellow_corn: 'Yellow Corn', white_corn: 'White Corn', cassava: 'Cassava' };
     const PH_TYPE_BADGE = {
@@ -1012,8 +1049,8 @@ function render_planting_harvesting_section($conn) {
         damage: '#fb7185',
         growth: '#2dd4bf'
     };
-    const PH_STATUS_ORDER = ['pending', 'verified'];
-    const PH_STATUS_LABEL = { pending: 'Pending', verified: 'Verified' };
+    const PH_STATUS_ORDER = ['pending', 'verified', 'rejected'];
+    const PH_STATUS_LABEL = { pending: 'Pending', verified: 'Verified', rejected: 'Rejected' };
     // "Growth" reports don't get their own tab — they're rare enough that a
     // dedicated section would mostly sit empty; they still show up fine
     // under "All".
@@ -1021,6 +1058,15 @@ function render_planting_harvesting_section($conn) {
     const PH_TYPE_TAB_LABEL = { planting: 'Planting', harvesting: 'Harvesting', damage: 'Damage' };
     let phCurrentFilter = 'all';
     let phCurrentTypeTab = 'all';
+
+    // Which reports the CURRENT tab covers: All = everything, Planting/Harvesting/Damage = that
+    // report type, Rejected = every rejected report (any type) — same idea as the Rejected tab
+    // on the disease reports.
+    function phScopedReports() {
+        if (phCurrentTypeTab === 'all')      return phAllReports;
+        if (phCurrentTypeTab === 'rejected') return phAllReports.filter(r => r.status === 'rejected');
+        return phAllReports.filter(r => r.report_type === phCurrentTypeTab);
+    }
 
     function phFormatDate(iso) {
         if (!iso) return '—';
@@ -1052,9 +1098,11 @@ function render_planting_harvesting_section($conn) {
         wrap.innerHTML = '';
         outer.classList.remove('hidden');
 
-        const countFor = (type) => type === 'all'
-            ? phAllReports.length
-            : phAllReports.filter(r => r.report_type === type).length;
+        const countFor = (type) => {
+            if (type === 'all')      return phAllReports.length;
+            if (type === 'rejected') return phAllReports.filter(r => r.status === 'rejected').length;
+            return phAllReports.filter(r => r.report_type === type).length;
+        };
 
         const makeTab = (type, label, active) => {
             const btn = document.createElement('button');
@@ -1070,6 +1118,8 @@ function render_planting_harvesting_section($conn) {
         PH_TYPE_ORDER.forEach(type => {
             wrap.appendChild(makeTab(type, PH_TYPE_TAB_LABEL[type], phCurrentTypeTab === type));
         });
+        // Rejected reports are kept (with the reviewer's reason), so they get their own tab.
+        wrap.appendChild(makeTab('rejected', 'Rejected', phCurrentTypeTab === 'rejected'));
     }
 
     function setPHTypeTab(type, btnEl) {
@@ -1090,9 +1140,7 @@ function render_planting_harvesting_section($conn) {
         const chipsEl = document.getElementById('phFilterChips');
         chipsEl.innerHTML = '';
 
-        const scoped = phCurrentTypeTab === 'all'
-            ? phAllReports
-            : phAllReports.filter(r => r.report_type === phCurrentTypeTab);
+        const scoped = phScopedReports();
 
         const presentStatuses = PH_STATUS_ORDER.filter(
             status => scoped.some(r => r.status === status)
@@ -1142,9 +1190,7 @@ function render_planting_harvesting_section($conn) {
         const searchTerm = (document.getElementById('phSearchInput')?.value || '').trim().toLowerCase();
         const dateFilter = document.getElementById('phDateInput')?.value || '';
 
-        let rows = phCurrentTypeTab === 'all'
-            ? phAllReports
-            : phAllReports.filter(r => r.report_type === phCurrentTypeTab);
+        let rows = phScopedReports();
 
         rows = phCurrentFilter === 'all'
             ? rows
@@ -1174,7 +1220,10 @@ function render_planting_harvesting_section($conn) {
         body.innerHTML = '';
 
         if (!rows.length) {
-            body.innerHTML = '<div class="ph-empty"><p class="text-xs font-bold uppercase tracking-widest">No reports match these filters</p></div>';
+            const emptyMsg = (phCurrentTypeTab === 'rejected' && !searchTerm && !dateFilter)
+                ? 'No rejected reports'
+                : 'No reports match these filters';
+            body.innerHTML = '<div class="ph-empty"><p class="text-xs font-bold uppercase tracking-widest">' + emptyMsg + '</p></div>';
             return;
         }
 
@@ -1349,8 +1398,10 @@ function render_planting_harvesting_section($conn) {
         const isFieldReport = data.report_type === 'growth' || data.report_type === 'damage';
         const typeLabel = data.report_type.charAt(0).toUpperCase() + data.report_type.slice(1);
 
-        // Fresh modal open — clear out any error left over from a previous review.
+        // Fresh modal open — clear out any error left over from a previous review,
+        // and put the reject flow back to its starting state.
         phSetReviewError('');
+        phResetRejectReason();
 
         document.getElementById('phv_reference').textContent = data.reference_id;
         document.getElementById('phv_crop').textContent = isFieldReport
@@ -1422,10 +1473,22 @@ function render_planting_harvesting_section($conn) {
         const pill = document.getElementById('phv_status_pill');
         const pillClasses = {
             verified: 'bg-blue-100 text-blue-700',
-            pending: 'bg-purple-100 text-purple-700'
+            pending: 'bg-purple-100 text-purple-700',
+            rejected: 'bg-rose-100 text-rose-700'
         };
         pill.className = 'sev-badge ml-auto ' + (pillClasses[data.status] || pillClasses.pending);
         pill.textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
+
+        // Rejected reports show the saved reason read-only instead of the editable remarks box.
+        const isRejectedReport = data.status === 'rejected';
+        document.getElementById('phv_remarks_wrap').classList.toggle('hidden', isRejectedReport);
+        document.getElementById('phv_rejection_view').classList.toggle('hidden', !isRejectedReport);
+        document.getElementById('phv_rejection_view_text').textContent = data.remarks || 'No reason was recorded for this rejection.';
+
+        // Personnel log — who created / verified / rejected this report
+        if (typeof renderPersonnelLog === 'function') {
+            renderPersonnelLog(data.personnel, 'phv_personnel_wrap', 'phv_personnel_list');
+        }
 
         const actionRow = document.getElementById('phv_action_row');
         const lockedNote = document.getElementById('phv_locked_note');
@@ -1464,6 +1527,43 @@ function render_planting_harvesting_section($conn) {
         buildPHTypeTabs();
         buildPHFilterChips();
         renderPHRows();
+    }
+
+    // Success / error message — the same toast the disease reports use (defined in review.php),
+    // falling back to a plain alert if it isn't on the page for some reason.
+    function phToast(message, type) {
+        if (typeof showAppToast === 'function') { showAppToast(message, type || 'success'); }
+        else { alert(message); }
+    }
+
+    // Swaps in the freshly-saved report the server sent back (new status, remarks, personnel log)
+    // and redraws the tabs, filter chips and list.
+    function phReplaceReportLocally(report) {
+        const idx = phFindReportIndex(report.report_id);
+        if (idx !== -1) { phAllReports[idx] = report; } else { phAllReports.unshift(report); }
+        buildPHTypeTabs();
+        buildPHFilterChips();
+        renderPHRows();
+    }
+
+    // ── Reject flow: clicking Reject first reveals a REQUIRED reason box; the second click
+    // ("Confirm Rejection") is what actually rejects. ──
+    function phStartRejectFlow() {
+        phSetReviewError('');
+        document.getElementById('phv_reject_reason_wrap').classList.remove('hidden');
+        document.getElementById('phv_verify_btn').classList.add('hidden');
+        document.getElementById('phv_reject_btn').textContent = 'Confirm Rejection';
+        document.getElementById('phv_reject_reason').focus();
+    }
+    function phResetRejectReason() {
+        const wrap  = document.getElementById('phv_reject_reason_wrap');
+        const input = document.getElementById('phv_reject_reason');
+        const verifyBtn = document.getElementById('phv_verify_btn');
+        const rejectBtn = document.getElementById('phv_reject_btn');
+        if (wrap)  wrap.classList.add('hidden');
+        if (input) input.value = '';
+        if (verifyBtn) verifyBtn.classList.remove('hidden');
+        if (rejectBtn) rejectBtn.textContent = 'Reject';
     }
 
     // Applies a status change (e.g. Verified) to the in-memory list without
@@ -1505,8 +1605,26 @@ function render_planting_harvesting_section($conn) {
             if (!submitter || !submitter.name) return;
 
             const isReject = submitter.id === 'phv_reject_btn';
+
+            // Reject needs a reason: the first click only reveals the reason box.
+            let rejectReason = '';
+            if (isReject) {
+                const reasonWrap = document.getElementById('phv_reject_reason_wrap');
+                const reasonEl   = document.getElementById('phv_reject_reason');
+                if (reasonWrap.classList.contains('hidden')) {
+                    phStartRejectFlow();
+                    return;
+                }
+                rejectReason = reasonEl.value.trim();
+                if (!rejectReason) {
+                    phSetReviewError('Please enter the reason for rejecting this report.');
+                    reasonEl.focus();
+                    return;
+                }
+            }
+
             const confirmMsg = isReject
-                ? 'Reject this report? Rejected reports are permanently deleted and cannot be recovered.'
+                ? 'Reject this report? It will be kept in the Rejected list together with your reason, and can no longer be changed.'
                 : 'Accept and verify this report? Once verified it will be locked and can no longer be changed.';
             if (!confirm(confirmMsg)) {
                 return;
@@ -1522,6 +1640,7 @@ function render_planting_harvesting_section($conn) {
 
             const formData = new FormData(phvForm);
             formData.set('ph_new_status', submitter.value);
+            if (isReject) { formData.set('ph_remarks_update', rejectReason); } // the reason is saved as the report's remarks
 
             fetch(window.location.pathname + window.location.search, {
                 method: 'POST',
@@ -1538,12 +1657,13 @@ function render_planting_harvesting_section($conn) {
                 }))
                 .then(data => {
                     if (data.success) {
-                        if (data.deleted) {
-                            phRemoveReportLocally(data.report_id);
+                        if (data.report) {
+                            phReplaceReportLocally(data.report);
                         } else {
                             phUpdateReportLocally(data.report_id, data.new_status, data.remarks);
                         }
                         closePHModal('phViewModal');
+                        phToast(data.message || 'Report updated successfully.');
                     } else {
                         // Report vanished from under us (already reviewed elsewhere,
                         // bad id, etc.) — drop it locally too so the UI can't get

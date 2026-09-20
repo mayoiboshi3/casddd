@@ -704,9 +704,12 @@ const PERSONNEL_STYLES = {
     rejected: { label: 'Rejected', icon: '\u2715', bg: '#fee2e2', color: '#991b1b' },
     resolved: { label: 'Resolved', icon: '\u2714', bg: '#d1fae5', color: '#065f46' },
 };
-function renderPersonnelLog(entries) {
-    const wrap = document.getElementById('view_personnel_wrap');
-    const list = document.getElementById('view_personnel_list');
+// wrapId / listId are optional: the disease popup uses the defaults, the Farm Reports
+// popup (planting_harvesting.php) passes its own containers so both share this renderer.
+function renderPersonnelLog(entries, wrapId, listId) {
+    const wrap = document.getElementById(wrapId || 'view_personnel_wrap');
+    const list = document.getElementById(listId || 'view_personnel_list');
+    if (!wrap || !list) return;
     list.innerHTML = '';
     if (!entries || !entries.length) { wrap.style.display = 'none'; return; }
 

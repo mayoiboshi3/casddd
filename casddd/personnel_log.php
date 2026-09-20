@@ -14,6 +14,9 @@
  *   - Resolved  -> who moved the case Verified -> Resolved
  *                  (disease_cases.resolved_by / resolved_at)
  *
+ * Farm reports (planting_harvesting_reports) use personnel_log_build_farm() at the
+ * bottom of this file: created_by / verified_by / rejected_by (+ verified_at, rejected_at).
+ *
  * Used by:
  *   - new_case_report.php  -> personnel_log_current_user_id() on insert
  *   - reports.php          -> stamps verified/rejected on status change,
@@ -156,6 +159,73 @@ function personnel_log_build($row) {
             'name'   => $who($row['resolved_by'] ?? 0, $row['resolver_name'] ?? null),
             'role'   => personnel_log_role_label($row['resolver_role'] ?? null),
             'at'     => $fmt($row['resolved_at'] ?? null),
+            'system' => false,
+        ];
+    }
+
+    return $log;
+}
+
+// ── FARM REPORTS (planting_harvesting_reports) ──
+// Same idea as personnel_log_build() above, for the Farm Reports section.
+// $row = a planting_harvesting_reports row fetched together with the users joins
+// (creator_name/role, verifier_name/role, rejecter_name/role — see ph_report_select_sql()
+// in planting_harvesting.php). Returns entries in the same shape the popup renders:
+//   created  -> the staff member who added it by hand, or "Farmer app" for farmer submissions
+//   verified -> who accepted it
+//   rejected -> who rejected it (the reason itself lives in the report's remarks)
+function personnel_log_build_farm($row) {
+    $fmt = function ($value) {
+        $t = $value ? strtotime($value) : false;
+        return $t ? date('M d, Y \a\t g:i A', $t) : null;
+    };
+    $who = function ($id, $name) {
+        if (!empty($name)) { return $name; }
+        return ((int)$id > 0) ? 'Former staff (ID ' . (int)$id . ')' : null;
+    };
+
+    $status = $row['status'] ?? '';
+    if ($status === '' || $status === null || $status === 'received') { $status = 'pending'; }
+
+    $log = [];
+
+    // ── Created ──
+    if (($row['source'] ?? 'farmer') === 'farmer') {
+        $log[] = [
+            'action' => 'created',
+            'name'   => 'Farmer app (submitted by the farmer)',
+            'role'   => null,
+            'at'     => $fmt($row['submitted_at'] ?? null),
+            'system' => true,
+        ];
+    } else {
+        $log[] = [
+            'action' => 'created',
+            'name'   => $who($row['created_by'] ?? 0, $row['creator_name'] ?? null),
+            'role'   => personnel_log_role_label($row['creator_role'] ?? null),
+            'at'     => $fmt($row['submitted_at'] ?? null),
+            'system' => false,
+        ];
+    }
+
+    // ── Verified ──
+    if ($status === 'verified' || !empty($row['verified_by'])) {
+        $log[] = [
+            'action' => 'verified',
+            'name'   => $who($row['verified_by'] ?? 0, $row['verifier_name'] ?? null),
+            'role'   => personnel_log_role_label($row['verifier_role'] ?? null),
+            'at'     => $fmt($row['verified_at'] ?? null),
+            'system' => false,
+        ];
+    }
+
+    // ── Rejected ──
+    if ($status === 'rejected' || !empty($row['rejected_by'])) {
+        $log[] = [
+            'action' => 'rejected',
+            'name'   => $who($row['rejected_by'] ?? 0, $row['rejecter_name'] ?? null),
+            'role'   => personnel_log_role_label($row['rejecter_role'] ?? null),
+            'at'     => $fmt($row['rejected_at'] ?? null),
             'system' => false,
         ];
     }
