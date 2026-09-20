@@ -86,7 +86,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
     // Manually-added reports are NOT verified automatically — they go in as
     // Pending, same as a farmer submission, so staff still has a chance to
     // Verify or Reject it from the report list (Reject deletes the record).
-    $status = '';
+    // Must be a real value of the `status` enum ('received','verified','rejected') —
+    // an empty string is rejected by MySQL in strict mode and the INSERT fails.
+    // 'received' is the column default and is treated as Pending everywhere below.
+    $status = 'received';
 
     $validReportTypes = ['planting', 'harvesting', 'damage'];
     $validCropTypes   = ['yellow_corn', 'white_corn', 'cassava'];
@@ -102,13 +105,26 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
         ? ($farmer_id > 0 && $description !== '')
         : ($farmer_id > 0 && $area_hectares > 0);
 
+    // Location is optional, but if given it must be a real coordinate. The columns are
+    // DECIMAL(10,7), so anything of 1000 or more overflows and MySQL refuses the row.
+    // Checked here (before the photo is stored) so the user gets a clear message.
+    if ($canSave && $isDamage) {
+        $latOk = ($latitude_raw  === '') || (is_numeric($latitude_raw)  && abs((float)$latitude_raw)  <= 90);
+        $lngOk = ($longitude_raw === '') || (is_numeric($longitude_raw) && abs((float)$longitude_raw) <= 180);
+        if (!$latOk || !$lngOk) {
+            echo "<script>alert('Invalid location. Latitude must be a number from -90 to 90 and longitude a number from -180 to 180 (for example 14.1894 and 121.1670), or leave both blank.'); window.history.back();</script>";
+            exit;
+        }
+    }
+
     if ($canSave) {
         $reference_id = ($isDamage ? 'DR-' : 'PH-') . date('ymd') . '-' . strtoupper(bin2hex(random_bytes(3)));
 
-        // Optional photo upload for Damage reports — same "uploads/<name>"
-        // convention the farmer app already uses for photo evidence.
+        // Photo upload — REQUIRED for every report type (Planting, Harvesting and
+        // Damage). Same "uploads/<name>" convention the farmer app already uses
+        // for photo evidence.
         $photo_db_value = 'NULL';
-        if ($isDamage && isset($_FILES['ph_photo']) && $_FILES['ph_photo']['error'] === UPLOAD_ERR_OK) {
+        if (isset($_FILES['ph_photo']) && $_FILES['ph_photo']['error'] === UPLOAD_ERR_OK) {
             $ext = strtolower(pathinfo($_FILES['ph_photo']['name'], PATHINFO_EXTENSION));
             $allowedExt = ['jpg', 'jpeg', 'png', 'webp'];
             if (in_array($ext, $allowedExt, true)) {
@@ -119,6 +135,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
                     $photo_db_value = "'" . mysqli_real_escape_string($conn, $fileName) . "'";
                 }
             }
+        }
+        // A photo is mandatory — a missing, wrong-type or failed upload doesn't count.
+        if ($photo_db_value === 'NULL') {
+            echo "<script>alert('A photo is required. Please attach a JPG, PNG or WEBP photo for this report.'); window.history.back();</script>";
+            exit;
         }
         $lat_db_value = is_numeric($latitude_raw)  ? (float)$latitude_raw  : 'NULL';
         $lng_db_value = is_numeric($longitude_raw) ? (float)$longitude_raw : 'NULL';
@@ -132,9 +153,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
         } else {
             $insertQuery = "INSERT INTO planting_harvesting_reports
                 (reference_id, farmer_id, report_type, source, crop_type, variety, planting_stage,
-                 area_hectares, privacy_consent, status, remarks, submitted_at, verified_at, created_at)
+                 area_hectares, photo, privacy_consent, status, remarks, submitted_at, verified_at, created_at)
                 VALUES ('$reference_id', $farmer_id, '$report_type', 'staff', '$crop_type', '$variety', '$planting_stage',
-                 $area_hectares, 1, '$status', '$remarks', NOW(), NULL, NOW())";
+                 $area_hectares, $photo_db_value, 1, '$status', '$remarks', NOW(), NULL, NOW())";
         }
 
         if (mysqli_query($conn, $insertQuery)) {
@@ -144,7 +165,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
             echo "<script>window.location='reports.php?ph_new=" . $new_report_id . "#ph-section';</script>";
             exit;
         } else {
-            echo "<script>alert('Could not save the report. Please try again.'); window.location='reports.php#ph-section';</script>";
+            $dbError = mysqli_error($conn);
+            error_log('Add farm report failed: ' . $dbError);
+            $failMsg = 'Could not save the report. Please try again.' . ($dbError !== '' ? "\n\nDetails: " . $dbError : '');
+            echo "<script>alert(" . json_encode($failMsg) . "); window.history.back();</script>";
             exit;
         }
     } else {
@@ -231,6 +255,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_ph_report'])) {
     }
 
     if ($is_ajax) {
+        // Drop the page shell reports.php already buffered (layout, sidebar, header) so
+        // the reply is ONLY the JSON — otherwise the browser can't parse it.
+        while (ob_get_level() > 0) { ob_end_clean(); }
         header('Content-Type: application/json');
         echo json_encode($result);
         exit;
@@ -505,6 +532,10 @@ function render_planting_harvesting_section($conn) {
                         <span class="field-label">Date Submitted</span>
                         <p class="font-semibold text-sm text-gray-800" id="phv_submitted"></p>
                     </div>
+                    <div id="phv_ph_photo_wrap" class="col-span-2 hidden">
+                        <span class="field-label">Photo</span>
+                        <img id="phv_ph_photo" class="w-full max-h-64 object-cover rounded-xl border border-gray-100 mt-1" onerror="this.parentElement.classList.add('hidden')">
+                    </div>
                 </div>
 
                 <!-- ═ Growth / Damage field report fields (photo + location + notes) ═ -->
@@ -645,26 +676,29 @@ function render_planting_harvesting_section($conn) {
                             <span class="field-label">What damage was observed?</span>
                             <textarea name="ph_description" id="phAddDescriptionInput" rows="3" class="field-input" placeholder="e.g. Fall armyworm infestation on lower leaves, roughly 2 rows affected..."></textarea>
                         </div>
-                        <div class="mb-4">
-                            <span class="field-label">Photo (optional)</span>
-                            <input type="file" name="ph_photo" id="phAddDamagePhotoInput" accept="image/png,image/jpeg,image/webp"
-                                   class="field-input" onchange="phHandleDamagePhotoSelect(event)">
-                            <div id="phAddDamagePhotoPreviewWrap" class="hidden mt-2.5">
-                                <div class="ph-damage-photo-preview">
-                                    <img id="phAddDamagePhotoPreviewImg" src="" alt="Selected photo">
-                                    <button type="button" onclick="phRemoveDamagePhoto()" aria-label="Remove photo">&times;</button>
-                                </div>
-                            </div>
-                        </div>
                         <div class="mb-1">
                             <span class="field-label">Location (optional)</span>
                         </div>
                         <div class="grid grid-cols-2 gap-4">
                             <div>
-                                <input type="text" name="ph_latitude" class="field-input" placeholder="Latitude, e.g. 14.1894">
+                                <input type="number" name="ph_latitude" id="phAddLatInput" step="any" min="-90" max="90" inputmode="decimal" class="field-input" placeholder="Latitude, e.g. 14.1894" title="Latitude: a number from -90 to 90">
                             </div>
                             <div>
-                                <input type="text" name="ph_longitude" class="field-input" placeholder="Longitude, e.g. 121.1670">
+                                <input type="number" name="ph_longitude" id="phAddLngInput" step="any" min="-180" max="180" inputmode="decimal" class="field-input" placeholder="Longitude, e.g. 121.1670" title="Longitude: a number from -180 to 180">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ═ Photo — required for every report type (kept outside the type-specific
+                         sections above so it is always visible and can always be validated) ═ -->
+                    <div class="mb-5">
+                        <span class="field-label">Photo <span class="text-red-500 font-black">(Required)</span></span>
+                        <input type="file" name="ph_photo" id="phAddDamagePhotoInput" accept="image/png,image/jpeg,image/webp"
+                               class="field-input" required onchange="phHandleDamagePhotoSelect(event)">
+                        <div id="phAddDamagePhotoPreviewWrap" class="hidden mt-2.5">
+                            <div class="ph-damage-photo-preview">
+                                <img id="phAddDamagePhotoPreviewImg" src="" alt="Selected photo">
+                                <button type="button" onclick="phRemoveDamagePhoto()" aria-label="Remove photo">&times;</button>
                             </div>
                         </div>
                     </div>
@@ -1128,9 +1162,9 @@ function render_planting_harvesting_section($conn) {
                 ? `${typeLabel} Report &mdash; ${(rep.description || 'No notes provided').substring(0, 60)}`
                 : `${typeLabel} &middot; ${cropLabel} &middot; ${parseFloat(rep.area_hectares || 0).toFixed(2)} ha`;
 
-            // Growth/Damage reports show their submitted photo as the thumbnail
-            // instead of the generic status icon, when one was uploaded.
-            const iconHtml = (isFieldReport && rep.photo)
+            // Reports show their submitted photo as the thumbnail instead of the
+            // generic status icon, when one was uploaded.
+            const iconHtml = (rep.photo)
                 ? `<img src="uploads/${rep.photo}" class="ph-row-icon" style="object-fit:cover" onerror="this.outerHTML='<div class=&quot;ph-row-icon&quot; style=&quot;background:${icon.bg};color:${icon.fg}&quot;></div>'">`
                 : `<div class="ph-row-icon" style="background:${icon.bg};color:${icon.fg}">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${icon.path}"/></svg>
@@ -1205,6 +1239,14 @@ function render_planting_harvesting_section($conn) {
         const descInput = document.getElementById('phAddDescriptionInput');
         if (areaInput) areaInput.required = !isDamage;
         if (descInput) descInput.required = isDamage;
+
+        // Location fields only exist for Damage reports — clear them when hidden.
+        if (!isDamage) {
+            const latInput = document.getElementById('phAddLatInput');
+            const lngInput = document.getElementById('phAddLngInput');
+            if (latInput) latInput.value = '';
+            if (lngInput) lngInput.value = '';
+        }
     }
 
     // ── FARM AREA — stepper + quick-pick presets, so entering a value doesn't
@@ -1323,6 +1365,15 @@ function render_planting_harvesting_section($conn) {
             document.getElementById('phv_variety').textContent = data.variety || '—';
             document.getElementById('phv_stage').textContent = data.planting_stage || '—';
             document.getElementById('phv_submitted').textContent = data.submitted_at ? new Date(data.submitted_at).toLocaleString() : '—';
+
+            // Planting/Harvesting reports carry a photo now too (older ones may not).
+            const phPhotoWrap = document.getElementById('phv_ph_photo_wrap');
+            if (data.photo) {
+                document.getElementById('phv_ph_photo').src = 'uploads/' + data.photo;
+                phPhotoWrap.classList.remove('hidden');
+            } else {
+                phPhotoWrap.classList.add('hidden');
+            }
         }
 
         document.getElementById('phv_remarks').value = data.remarks || '';
@@ -1437,7 +1488,14 @@ function render_planting_harvesting_section($conn) {
                 body: formData,
                 headers: { 'X-Requested-With': 'XMLHttpRequest' }
             })
-                .then(res => res.json())
+                .then(res => res.text().then(text => {
+                    try {
+                        return JSON.parse(text);
+                    } catch (err) {
+                        console.error('Unexpected (non-JSON) reply from server:', text.slice(0, 500));
+                        throw new Error('bad-response');
+                    }
+                }))
                 .then(data => {
                     if (data.success) {
                         if (data.deleted) {
@@ -1457,7 +1515,11 @@ function render_planting_harvesting_section($conn) {
                         phSetReviewError(data.message || 'Something went wrong. Please try again.');
                     }
                 })
-                .catch(() => {
+                .catch(err => {
+                    if (err && err.message === 'bad-response') {
+                        phSetReviewError('The server sent an unexpected reply. The report may have been updated \u2014 please refresh the page to check.');
+                        return;
+                    }
                     phSetReviewError('Network error — please check your connection and try again.');
                 })
                 .finally(() => {

@@ -1,4 +1,8 @@
 <?php 
+// Buffer this page's output. includes/layout.php prints the page shell (sidebar, header) BEFORE the
+// Accept/Reject handler in planting_harvesting.php runs; buffering lets that handler throw the shell
+// away and answer the browser's fetch() with pure JSON. Normal page loads are unaffected.
+ob_start();
 require_once __DIR__ . "/src/db_config.php"; 
 $pageTitle = "Disease Reports"; 
 include "includes/layout.php"; 
@@ -25,6 +29,10 @@ $col_check = mysqli_query($conn, "SHOW COLUMNS FROM disease_cases LIKE 'infectio
 if ($col_check && mysqli_num_rows($col_check) === 0) {
     mysqli_query($conn, "ALTER TABLE disease_cases ADD COLUMN infection_percentage DECIMAL(5,2) DEFAULT NULL AFTER total_plants");
 }
+
+// --- PERSONNEL LOG: who created / verified / rejected each case. Exposes the
+// helpers used below (needs verified_at / rejected_by / rejected_at / resolved_by / resolved_at on disease_cases).
+require_once __DIR__ . "/personnel_log.php";
 
 // --- NEW FIELD CASE REPORT: form + insert logic now live in their own file ---
 // (runs the POST-insert handling immediately here, same as before; the modal's
@@ -88,7 +96,21 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
         $ref_esc = mysqli_real_escape_string($conn, $reference_id);
         // WHERE reference_id (not case_id) — every disease row under this report
         // is verified / resolved / rejected together, as one unit.
-        $updateQuery = "UPDATE disease_cases SET status = '$new_status', remarks = '$remarks', updated_at = NOW() $severitySql WHERE reference_id = '$ref_esc'";
+        // Personnel log: record WHO moved the case, but only when the status really changes
+        // (saving remarks on an already-verified case must not overwrite the original verifier).
+        $personnelSql = '';
+        if ($new_status !== $cur_status) {
+            $actorId  = personnel_log_current_user_id($conn);
+            $actorSql = $actorId > 0 ? (int)$actorId : 'NULL';
+            if ($new_status === 'verified') {
+                $personnelSql = ", verified_by = $actorSql, verified_date = CURDATE(), verified_at = NOW()";
+            } elseif ($new_status === 'rejected') {
+                $personnelSql = ", rejected_by = $actorSql, rejected_at = NOW()";
+            } elseif ($new_status === 'resolved') {
+                $personnelSql = ", resolved_by = $actorSql, resolved_at = NOW()";
+            }
+        }
+        $updateQuery = "UPDATE disease_cases SET status = '$new_status', remarks = '$remarks', updated_at = NOW() $severitySql $personnelSql WHERE reference_id = '$ref_esc'";
         if(mysqli_query($conn, $updateQuery)) {
             echo "<script>alert('Intelligence Update Saved!'); window.location='reports.php?view=disease&tab=" . $new_status . "';</script>";
             exit;
@@ -377,7 +399,8 @@ function buildCaseMessages($conn, $row) {
 $stats_query = mysqli_query($conn, "SELECT COUNT(*) as total, 
     COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending, 
     COUNT(CASE WHEN status = 'verified' THEN 1 END) as verified, 
-    COUNT(CASE WHEN status = 'resolved' THEN 1 END) as resolved FROM disease_cases");
+    COUNT(CASE WHEN status = 'resolved' THEN 1 END) as resolved, 
+    COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected FROM disease_cases");
 $stats     = mysqli_fetch_assoc($stats_query);
 $activeTab = $_GET['tab'] ?? 'pending';
 
@@ -408,7 +431,7 @@ if ($filterBrgyDrop) { $filterBarangayId = $filterBrgyDrop; }
 $allBarangays_q = mysqli_query($conn, "SELECT id, name FROM barangays ORDER BY name ASC");
 
 if ($filterBarangayId && !isset($_GET['tab'])) {
-    $tab_q = mysqli_query($conn, "SELECT status FROM disease_cases WHERE barangay_id=$filterBarangayId ORDER BY FIELD(status,'pending','verified','resolved') LIMIT 1");
+    $tab_q = mysqli_query($conn, "SELECT status FROM disease_cases WHERE barangay_id=$filterBarangayId ORDER BY FIELD(status,'pending','verified','resolved','rejected') LIMIT 1");
     if ($tab_q && $row_t = mysqli_fetch_assoc($tab_q)) {
         $activeTab = $row_t['status'];
     }
@@ -427,11 +450,13 @@ if ($autoOpenCaseId) {
         $ao_q = mysqli_query($conn, "SELECT dc.*, b.name AS brgy_name, d.disease_name,
             d.description AS disease_description,
             d.recommended_treatment, d.prevention_measures,
-            f.profile_farmers AS farmer_photo
+            f.profile_farmers AS farmer_photo,
+            " . personnel_log_select_sql() . "
             FROM disease_cases dc
             LEFT JOIN barangays b  ON dc.barangay_id = b.id
             LEFT JOIN diseases d   ON dc.disease_id  = d.disease_id
             LEFT JOIN farmers f    ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
+            " . personnel_log_join_sql() . "
             WHERE dc.reference_id = '$ao_ref'
             ORDER BY dc.case_id ASC");
         $ao_rows = [];
@@ -770,6 +795,7 @@ $tableRows = [];
                 'pending'  => ['label' => 'Pending',  'count' => (int)$stats['pending']],
                 'verified' => ['label' => 'Verified', 'count' => (int)$stats['verified']],
                 'resolved' => ['label' => 'Resolved', 'count' => (int)$stats['resolved']],
+                'rejected' => ['label' => 'Rejected', 'count' => (int)$stats['rejected']],
             ];
             $tabQueryExtra = '';
             if ($filterBarangayId) $tabQueryExtra .= '&brgy_filter=' . $filterBarangayId;
@@ -870,11 +896,13 @@ $tableRows = [];
                     d.description AS disease_description,
                     d.recommended_treatment,
                     d.prevention_measures,
-                    f.profile_farmers AS farmer_photo
+                    f.profile_farmers AS farmer_photo,
+                    " . personnel_log_select_sql() . "
                   FROM disease_cases dc 
                   LEFT JOIN barangays b ON dc.barangay_id = b.id 
                   LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
                   LEFT JOIN farmers f   ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
+                  " . personnel_log_join_sql() . "
                   WHERE 1=1 $status_filter $brgy_filter $date_filter 
                   ORDER BY dc.report_date DESC, dc.case_id ASC";
         $result = mysqli_query($conn, $query);
@@ -952,6 +980,7 @@ $tableRows = [];
                     'recommendation_text'    => $row['recommendation_text']    ?? null,
                     'recommendation_sent_at' => $row['recommendation_sent_at'] ?? null,
                     'messages'               => buildCaseMessages($conn, $row),
+                    'personnel'              => personnel_log_build($row),
                 ];
                 $tableRows[] = $modal_row;
 
@@ -1145,6 +1174,7 @@ window.addEventListener('DOMContentLoaded', function() {
         'recommendation_text'    => (isset($_GET['open_msg']) && $_GET['open_msg'] === '1') ? null : ($autoOpenData['recommendation_text'] ?? null),
         'recommendation_sent_at' => $autoOpenData['recommendation_sent_at'] ?? null,
         'messages'               => $autoOpenData['messages']               ?? [],
+        'personnel'              => personnel_log_build($autoOpenData),
     ]) ?>);
     <?php if (isset($_GET['open_msg']) && $_GET['open_msg'] === '1'): ?>
     openMessageModal();

@@ -25,12 +25,16 @@
  * row is inserted using the "Other / Unidentified" disease (id 999) so the
  * report still has somewhere to live in the schema.
  *
- * Photos: any number of images can be attached. Since `photo_evidence` is a
- * single varchar column, filenames are stored as a comma-separated list.
+ * Photos: at least ONE image is required (any number can be attached). Since
+ * `photo_evidence` is a single varchar column, filenames are stored as a
+ * comma-separated list.
  * ----------------------------------------------------------------------
  */
 
-// ── 1. HANDLE DATABASE INSERT (up to 3 diseases, optional + multiple photos) ──
+// Personnel log helpers — who is signed in, so the case records its creator.
+require_once __DIR__ . '/personnel_log.php';
+
+// ── 1. HANDLE DATABASE INSERT (up to 3 diseases optional, 1+ photos required) ──
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
 
     $disease_ids = isset($_POST['disease_ids']) && is_array($_POST['disease_ids']) ? $_POST['disease_ids'] : [];
@@ -55,6 +59,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
     }
 
     $ref_id       = "REF-" . date("Y") . "-" . strtoupper(substr(md5(time()), 0, 4));
+    // Personnel log: the staff member creating this case by hand (0 = could not be determined).
+    $reported_by  = (int) personnel_log_current_user_id($conn);
     $farmer_name  = mysqli_real_escape_string($conn, $_POST['farmer_name']);
     $brgy_id      = mysqli_real_escape_string($conn, $_POST['brgy_id']);
     $stage        = mysqli_real_escape_string($conn, $_POST['growth_stage']);
@@ -83,9 +89,13 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
             }
         }
     }
-    $photo_evidence_val = !empty($saved_filenames)
-        ? "'" . mysqli_real_escape_string($conn, implode(',', $saved_filenames)) . "'"
-        : "NULL";
+    // Photo evidence is REQUIRED — at least one image must have uploaded successfully
+    // (a file that was the wrong type or failed to upload doesn't count).
+    if (empty($saved_filenames)) {
+        echo "<script>alert('A photo is required. Please attach at least one valid image (JPG, PNG, GIF or WEBP) of the affected crop.'); window.history.back();</script>";
+        exit;
+    }
+    $photo_evidence_val = "'" . mysqli_real_escape_string($conn, implode(',', $saved_filenames)) . "'";
 
     $insertedCount = 0;
     foreach ($disease_ids as $raw_disease_id) {
@@ -93,7 +103,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
 
         $insertQuery = "INSERT INTO disease_cases
             (reference_id, disease_id, farm_id, farmer_id, barangay_id, reported_by, growth_stage, date_planted, description, severity, photo_evidence, status, report_date)
-            VALUES ('$ref_id', '$d_id', 0, 0, '$brgy_id', 0, '$stage', '$date_planted', '$full_desc', '$severity', $photo_evidence_val, 'pending', NOW())";
+            VALUES ('$ref_id', '$d_id', 0, 0, '$brgy_id', $reported_by, '$stage', '$date_planted', '$full_desc', '$severity', $photo_evidence_val, 'pending', NOW())";
 
         if (mysqli_query($conn, $insertQuery)) {
             $insertedCount++;
@@ -156,6 +166,7 @@ function render_new_case_report_modal($conn, $today, $minDate) {
             text-align:center; cursor:pointer; transition:all 0.25s ease; background:#f9fafb; position:relative;
         }
         .ncr-upload-zone:hover { border-color:#10b981; background:#f0fdf4; }
+        .ncr-upload-zone.ncr-upload-error { border-color:#ef4444; background:#fef2f2; }
         .ncr-upload-zone input[type=file] { position:absolute; inset:0; opacity:0; cursor:pointer; width:100%; height:100%; }
         #ncrPhotoGrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(110px, 1fr)); gap:10px; margin-top:0.85rem; }
         .ncr-photo-thumb { position:relative; border-radius:0.75rem; overflow:hidden; border:1.5px solid #d1d5db; aspect-ratio:1/1; }
@@ -281,17 +292,17 @@ function render_new_case_report_modal($conn, $today, $minDate) {
                     <div class="bg-gray-50 rounded-2xl p-5 border border-gray-100">
                         <div class="flex items-center gap-2 mb-1">
                             <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest">— Disease Pictures</p>
-                            <span class="text-[9px] font-black text-gray-300 uppercase tracking-widest">(Optional · any number of photos)</span>
+                            <span class="text-[9px] font-black text-red-500 uppercase tracking-widest">(Required · at least 1 photo)</span>
                         </div>
                         <p class="text-[10px] font-bold text-gray-300 mb-4">Attach as many field photos as needed to document the affected crop</p>
 
                         <div class="ncr-upload-zone" id="ncr_upload_zone" onclick="document.getElementById('ncr_photo_input').click()">
-                            <input type="file" id="ncr_photo_input" name="disease_photos[]" accept="image/*" multiple onchange="ncrHandlePhotoSelect(event)">
+                            <input type="file" id="ncr_photo_input" name="disease_photos[]" accept="image/*" multiple required onchange="ncrHandlePhotoSelect(event)">
                             <svg class="w-8 h-8 mx-auto mb-2 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/>
                             </svg>
-                            <p class="text-xs font-black text-gray-400 uppercase tracking-wide">Click to upload photos</p>
+                            <p class="text-xs font-black text-gray-400 uppercase tracking-wide">Click to upload photos <span class="text-red-500">*</span></p>
                             <p class="text-[10px] font-bold text-gray-300 mt-1">JPG · PNG · WEBP — max 5MB each, add as many as you like</p>
                         </div>
                         <div id="ncrPhotoGrid"></div>
@@ -456,7 +467,16 @@ function render_new_case_report_modal($conn, $today, $minDate) {
         ncrSelectedPhotoFiles = ncrSelectedPhotoFiles.concat(newFiles);
         ncrRenderPhotoGrid();
         ncrSyncPhotoInput();
+        if (ncrSelectedPhotoFiles.length > 0) {
+            document.getElementById('ncr_upload_zone').classList.remove('ncr-upload-error');
+        }
     }
+
+    // The photo input is `required`: when the browser blocks a submit because no photo
+    // is attached, turn the upload zone red so it's obvious what's missing.
+    document.getElementById('ncr_photo_input').addEventListener('invalid', function () {
+        document.getElementById('ncr_upload_zone').classList.add('ncr-upload-error');
+    });
 
     function ncrRenderPhotoGrid() {
         const grid = document.getElementById('ncrPhotoGrid');
