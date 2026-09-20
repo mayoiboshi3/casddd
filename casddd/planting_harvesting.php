@@ -144,10 +144,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
     if ($canSave) {
         $reference_id = ($isDamage ? 'DR-' : 'PH-') . date('ymd') . '-' . strtoupper(bin2hex(random_bytes(3)));
 
-        // Photo upload — REQUIRED for every report type (Planting, Harvesting and
-        // Damage). Same "uploads/<name>" convention the farmer app already uses
+        // Photo upload — REQUIRED for Damage reports only; OPTIONAL for Planting and
+        // Harvesting. Same "uploads/<name>" convention the farmer app already uses
         // for photo evidence.
         $photo_db_value = 'NULL';
+        $photo_attempted = isset($_FILES['ph_photo']) && $_FILES['ph_photo']['error'] !== UPLOAD_ERR_NO_FILE;
         if (isset($_FILES['ph_photo']) && $_FILES['ph_photo']['error'] === UPLOAD_ERR_OK) {
             $ext = strtolower(pathinfo($_FILES['ph_photo']['name'], PATHINFO_EXTENSION));
             $allowedExt = ['jpg', 'jpeg', 'png', 'webp'];
@@ -160,9 +161,14 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
                 }
             }
         }
-        // A photo is mandatory — a missing, wrong-type or failed upload doesn't count.
-        if ($photo_db_value === 'NULL') {
-            echo "<script>alert('A photo is required. Please attach a JPG, PNG or WEBP photo for this report.'); window.history.back();</script>";
+        // Damage reports need a photo — a missing, wrong-type or failed upload doesn't count.
+        // For Planting/Harvesting the photo is optional, but if one was picked and
+        // couldn't be saved (wrong type / failed upload), say so instead of dropping it silently.
+        if ($photo_db_value === 'NULL' && ($isDamage || $photo_attempted)) {
+            $photoMsg = $isDamage
+                ? 'A photo is required. Please attach a JPG, PNG or WEBP photo for this report.'
+                : 'The photo could not be uploaded. Please attach a JPG, PNG or WEBP photo, or leave it out.';
+            echo "<script>alert(" . json_encode($photoMsg) . "); window.history.back();</script>";
             exit;
         }
         $lat_db_value = is_numeric($latitude_raw)  ? (float)$latitude_raw  : 'NULL';
@@ -713,12 +719,12 @@ function render_planting_harvesting_section($conn) {
                         </div>
                     </div>
 
-                    <!-- ═ Photo — required for every report type (kept outside the type-specific
-                         sections above so it is always visible and can always be validated) ═ -->
+                    <!-- ═ Photo — required for Damage reports, optional for Planting/Harvesting (kept
+                         outside the type-specific sections above so it is always visible) ═ -->
                     <div class="mb-5">
-                        <span class="field-label">Photo <span class="text-red-500 font-black">(Required)</span></span>
+                        <span class="field-label">Photo <span id="phAddPhotoTag" class="text-gray-400 font-black">(Optional)</span></span>
                         <input type="file" name="ph_photo" id="phAddDamagePhotoInput" accept="image/png,image/jpeg,image/webp"
-                               class="field-input" required onchange="phHandleDamagePhotoSelect(event)">
+                               class="field-input" onchange="phHandleDamagePhotoSelect(event)">
                         <div id="phAddDamagePhotoPreviewWrap" class="hidden mt-2.5">
                             <div class="ph-damage-photo-preview">
                                 <img id="phAddDamagePhotoPreviewImg" src="" alt="Selected photo">
@@ -1263,6 +1269,16 @@ function render_planting_harvesting_section($conn) {
         const descInput = document.getElementById('phAddDescriptionInput');
         if (areaInput) areaInput.required = !isDamage;
         if (descInput) descInput.required = isDamage;
+
+        // Photo is only mandatory for Damage reports.
+        const photoInput = document.getElementById('phAddDamagePhotoInput');
+        const photoTag   = document.getElementById('phAddPhotoTag');
+        if (photoInput) photoInput.required = isDamage;
+        if (photoTag) {
+            photoTag.textContent = isDamage ? '(Required)' : '(Optional)';
+            photoTag.classList.toggle('text-red-500', isDamage);
+            photoTag.classList.toggle('text-gray-400', !isDamage);
+        }
 
         // Location fields only exist for Damage reports — clear them when hidden.
         if (!isDamage) {
