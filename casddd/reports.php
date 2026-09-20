@@ -4,7 +4,7 @@
 // away and answer the browser's fetch() with pure JSON. Normal page loads are unaffected.
 ob_start();
 require_once __DIR__ . "/src/db_config.php"; 
-$pageTitle = "Disease Reports"; 
+$pageTitle = "Reports"; 
 include "includes/layout.php"; 
 
 // --- SELF-HEALING SCHEMA: case_messages table (log of sent recommendations) ---
@@ -768,7 +768,7 @@ $tableRows = [];
         <div class="flex items-center gap-4">
             <div class="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0 text-2xl">🌽</div>
             <div>
-                <h3 class="text-lg font-bold text-gray-900 tracking-tight">Farmer Reports</h3>
+                <h3 class="text-lg font-bold text-gray-900 tracking-tight">Disease Reports</h3>
                 <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Corn disease cases reported by farmers</p>
             </div>
         </div>
