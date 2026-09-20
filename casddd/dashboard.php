@@ -344,33 +344,6 @@ main { display: flex; width: 100%; height: 100vh; }
 .brgy-search-input:focus, .brgy-date-input:focus { outline: none; border-color: #94a3b8; }
 .brgy-date-wrap { flex-shrink: 0; width: 140px; }
 
-/* ── QUICK FILTER PILLS (All / Pending / Verified) ── */
-.brgy-quick-filters {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 12px;
-    flex-shrink: 0;
-}
-.brgy-quick-filter {
-    flex-shrink: 0;
-    background: #ffffff;
-    color: #475569;
-    border: 1px solid #e2e8f0;
-    border-radius: 999px;
-    padding: 5px 13px;
-    font-size: 0.68rem;
-    font-weight: 800;
-    cursor: pointer;
-    font-family: inherit;
-    transition: background .15s ease, color .15s ease, border-color .15s ease;
-}
-.brgy-quick-filter.active-quick-filter {
-    background: #0f172a;
-    color: #ffffff;
-    border-color: #0f172a;
-}
-
 /* ── REPORT LIST + CARDS ── */
 .brgy-report-list {
     display: flex;
@@ -874,11 +847,6 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
             </div>
         </div>`;
 
-        // ── Quick filter pills (All / Pending / Verified) — mirrored to, and kept in sync with, the status tabs above ──
-        const quickFilterHtml = `<div class="brgy-quick-filters">
-            ${['all', 'pending', 'verified'].map(k => `<button type="button" class="brgy-quick-filter${k === 'all' ? ' active-quick-filter' : ''}" data-status="${k}" onclick="event.stopPropagation();setBrgyStatusFilter('${k}');">${k.charAt(0).toUpperCase() + k.slice(1)}</button>`).join('')}
-        </div>`;
-
         const popup = document.getElementById('brgy-popup');
         popup.innerHTML = `
             <!-- Header -->
@@ -897,7 +865,6 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
 
             ${statusTabsHtml}
             ${searchRowHtml}
-            ${quickFilterHtml}
 
             <!-- Scrollable list of report cards -->
             <div id="brgy-report-list" class="brgy-report-list"></div>
@@ -933,7 +900,6 @@ function closePopup() {
 function setBrgyStatusFilter(status) {
     brgyFilterState.status = status;
     document.querySelectorAll('.brgy-status-tab').forEach(t => t.classList.toggle('active-status-tab', t.dataset.status === status));
-    document.querySelectorAll('.brgy-quick-filter').forEach(f => f.classList.toggle('active-quick-filter', f.dataset.status === status));
     renderBrgyReportList();
 }
 
