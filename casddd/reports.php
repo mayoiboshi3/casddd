@@ -292,7 +292,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
         }
         $updateQuery = "UPDATE disease_cases SET status = '$new_status', remarks = '$remarks', updated_at = NOW() $severitySql $personnelSql WHERE reference_id = '$ref_esc'";
         if(mysqli_query($conn, $updateQuery)) {
-            casd_alert_redirect('success', 'Intelligence Update Saved', 'The case status and remarks were saved successfully.', 'reports.php?view=disease&tab=' . $new_status, 2200);
+            casd_alert_redirect('success', 'Status Updated', 'The case status and remarks were saved successfully.', 'reports.php?view=disease&tab=' . $new_status, 2200);
             exit;
         }
     } else {
