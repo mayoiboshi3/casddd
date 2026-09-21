@@ -7,6 +7,177 @@ require_once __DIR__ . "/src/db_config.php";
 $pageTitle = "Reports"; 
 include "includes/layout.php"; 
 
+// ── STYLED DIALOGS (replaces native alert()) ─────────────────────────────────
+// casd_dialog_assets() prints the dialog CSS + JS once. It also overrides window.alert,
+// so any leftover alert("...") on this page gets the same look.
+function casd_dialog_assets() {
+    static $done = false;
+    if ($done) return;
+    $done = true;
+    echo <<<'CASD_ASSETS'
+<style id="casd-dialog-css">
+.casd-overlay{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(15,23,42,.45);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);animation:casdFade .22s ease both;font-family:inherit}
+.casd-overlay.casd-out{animation:casdFadeOut .18s ease both}
+.casd-card{position:relative;overflow:hidden;width:min(92vw,400px);background:#fff;border-radius:2rem;padding:34px 28px 26px;text-align:center;box-shadow:0 30px 70px -12px rgba(15,23,42,.35),0 0 0 1px rgba(226,232,240,.8);animation:casdPop .42s cubic-bezier(.34,1.56,.64,1) both}
+.casd-out .casd-card{animation:casdPopOut .18s ease both}
+.casd-icon{width:68px;height:68px;margin:0 auto 18px;border-radius:9999px;display:flex;align-items:center;justify-content:center;background:var(--casd-bg);color:var(--casd-fg);box-shadow:0 0 0 8px var(--casd-ring)}
+.casd-icon svg{width:32px;height:32px;display:block}
+.casd-draw{stroke-dasharray:32;stroke-dashoffset:32;animation:casdDraw .5s .18s ease forwards}
+.casd-title{margin:0 0 8px;font-size:1.2rem;font-weight:900;letter-spacing:-.01em;color:#0f172a;line-height:1.25}
+.casd-msg{margin:0 0 24px;font-size:.86rem;font-weight:500;line-height:1.6;color:#64748b;white-space:pre-line;word-break:break-word}
+.casd-btn{display:block;width:100%;border:0;cursor:pointer;border-radius:.9rem;padding:13px 16px;background:var(--casd-btn);color:#fff;font:inherit;font-size:.7rem;font-weight:900;letter-spacing:.09em;text-transform:uppercase;box-shadow:0 8px 18px -6px var(--casd-glow);transition:transform .25s cubic-bezier(.4,0,.2,1),box-shadow .25s cubic-bezier(.4,0,.2,1),filter .25s}
+.casd-btn:hover{transform:translateY(-2px);box-shadow:0 12px 22px -6px var(--casd-glow);filter:brightness(1.08)}
+.casd-btn:active{transform:translateY(0) scale(.98)}
+.casd-btn:focus-visible{outline:3px solid var(--casd-ring);outline-offset:2px}
+.casd-bar{position:absolute;left:0;bottom:0;height:4px;width:100%;background:var(--casd-btn);transform-origin:left;opacity:.85;animation:casdBar var(--casd-dur,2200ms) linear forwards}
+@keyframes casdFade{from{opacity:0}to{opacity:1}}
+@keyframes casdFadeOut{from{opacity:1}to{opacity:0}}
+@keyframes casdPop{from{opacity:0;transform:translateY(14px) scale(.9)}to{opacity:1;transform:none}}
+@keyframes casdPopOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(8px) scale(.96)}}
+@keyframes casdDraw{to{stroke-dashoffset:0}}
+@keyframes casdBar{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+@media (prefers-reduced-motion:reduce){.casd-overlay,.casd-card,.casd-draw,.casd-bar{animation-duration:.01ms!important;animation-delay:0s!important}.casd-draw{stroke-dashoffset:0}}
+</style>
+<script id="casd-dialog-js">
+(function () {
+    if (window.casdAlert) return;
+
+    var THEMES = {
+        success: { bg: '#d1fae5', fg: '#059669', ring: 'rgba(16,185,129,.16)', btn: '#10b981', glow: 'rgba(16,185,129,.55)', title: 'Success',              label: 'Continue' },
+        error:   { bg: '#fee2e2', fg: '#dc2626', ring: 'rgba(239,68,68,.14)',  btn: '#ef4444', glow: 'rgba(239,68,68,.5)',   title: 'Something Went Wrong', label: 'Got it'   },
+        warning: { bg: '#fef3c7', fg: '#d97706', ring: 'rgba(245,158,11,.16)', btn: '#f59e0b', glow: 'rgba(245,158,11,.55)', title: 'Heads Up',             label: 'Got it'   },
+        info:    { bg: '#dbeafe', fg: '#2563eb', ring: 'rgba(37,99,235,.13)',  btn: '#2563eb', glow: 'rgba(37,99,235,.5)',   title: 'Notice',               label: 'OK'       }
+    };
+    var SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+    var ICONS = {
+        success: SVG + '<path class="casd-draw" d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+        error:   SVG + '<path class="casd-draw" d="M6 6l12 12M18 6L6 18"/></svg>',
+        warning: SVG + '<path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+        info:    SVG + '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>'
+    };
+
+    var queue = [], active = false;
+
+    function whenBody(fn) {
+        if (document.body) fn(); else document.addEventListener('DOMContentLoaded', fn);
+    }
+
+    function next() {
+        var item = queue.shift();
+        if (!item) { active = false; return; }
+        active = true;
+        whenBody(function () { render(item); });
+    }
+
+    function render(item) {
+        var o     = item.opts;
+        var type  = THEMES[o.type] ? o.type : 'info';
+        var t     = THEMES[type];
+        var auto  = parseInt(o.autoClose, 10) || 0;
+        var prevFocus = document.activeElement;
+        var closed = false, timer = null;
+
+        var overlay = document.createElement('div');
+        overlay.className = 'casd-overlay';
+        overlay.innerHTML =
+            '<div class="casd-card" role="alertdialog" aria-modal="true" aria-labelledby="casd-t" aria-describedby="casd-m">' +
+                '<div class="casd-icon">' + ICONS[type] + '</div>' +
+                '<h3 class="casd-title" id="casd-t"></h3>' +
+                '<p class="casd-msg" id="casd-m"></p>' +
+                '<button type="button" class="casd-btn"></button>' +
+                (auto ? '<div class="casd-bar"></div>' : '') +
+            '</div>';
+
+        var card = overlay.firstChild;
+        card.style.setProperty('--casd-bg',   t.bg);
+        card.style.setProperty('--casd-fg',   t.fg);
+        card.style.setProperty('--casd-ring', t.ring);
+        card.style.setProperty('--casd-btn',  t.btn);
+        card.style.setProperty('--casd-glow', t.glow);
+        if (auto) card.style.setProperty('--casd-dur', auto + 'ms');
+
+        overlay.querySelector('.casd-title').textContent = o.title || t.title;
+        overlay.querySelector('.casd-msg').textContent   = item.message;
+        var btn = overlay.querySelector('.casd-btn');
+        btn.textContent = o.buttonText || t.label;
+
+        function close() {
+            if (closed) return;
+            closed = true;
+            clearTimeout(timer);
+            document.removeEventListener('keydown', onKey, true);
+            overlay.classList.add('casd-out');
+            setTimeout(function () {
+                if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                try { if (prevFocus && prevFocus.focus) prevFocus.focus(); } catch (e) {}
+                item.resolve();
+                if (o.redirect) {
+                    window.location.href = o.redirect;
+                    // Page is normally about to unload. If it doesn't (same-page hash, blocked
+                    // navigation), resume the queue so later dialogs are not stuck.
+                    setTimeout(next, 1500);
+                    return;
+                }
+                next();
+            }, 180);
+        }
+
+        function onKey(e) {
+            if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault(); e.stopPropagation(); close();
+            } else if (e.key === 'Tab') {
+                e.preventDefault(); btn.focus();
+            }
+        }
+
+        btn.addEventListener('click', close);
+        document.addEventListener('keydown', onKey, true);
+        document.body.appendChild(overlay);
+        btn.focus();
+        if (auto) timer = setTimeout(close, auto);
+    }
+
+    /**
+     * casdAlert(message, { type, title, buttonText, autoClose, redirect })
+     *   type       'success' | 'error' | 'warning' | 'info'
+     *   autoClose  ms until it dismisses itself (shows a progress bar)
+     *   redirect   URL to go to once the dialog is dismissed
+     * Returns a Promise that resolves when the dialog is dismissed.
+     */
+    window.casdAlert = function (message, opts) {
+        if (message && typeof message === 'object') { opts = message; message = opts.message; }
+        return new Promise(function (resolve) {
+            queue.push({ message: message == null ? '' : String(message), opts: opts || {}, resolve: resolve });
+            if (!active) next();
+        });
+    };
+
+    // Any plain alert("...") anywhere on the page (including included files such as
+    // pdf_generator.php) now uses the styled dialog too. The type is guessed from the wording.
+    window.alert = function (msg) {
+        var s = msg == null ? '' : String(msg), type = 'info';
+        if (/(success|saved|sent|complete|updated|generated|downloaded)/i.test(s))                        type = 'success';
+        else if (/(error|fail|invalid|unable|denied|not allowed|can only|cannot|can't|went wrong)/i.test(s)) type = 'error';
+        else if (/(please|select|required|must|warning)/i.test(s))                                        type = 'warning';
+        window.casdAlert(s, { type: type });
+    };
+})();
+</script>
+CASD_ASSETS;
+}
+
+// Shows a styled dialog, then sends the browser to $url when it is dismissed.
+// $type: success | error | warning | info.  $autoCloseMs > 0 = closes itself (with a progress bar).
+function casd_alert_redirect($type, $title, $message, $url, $autoCloseMs = 0) {
+    casd_dialog_assets();
+    $payload = json_encode(
+        ['type' => $type, 'title' => $title, 'autoClose' => (int)$autoCloseMs, 'redirect' => $url],
+        JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE
+    );
+    $msg = json_encode((string)$message, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE);
+    echo "<script>casdAlert($msg, $payload);</script>";
+}
+
 // --- SELF-HEALING SCHEMA: case_messages table (log of sent recommendations) ---
 // Every recommendation sent becomes one timestamped entry here, instead of
 // overwriting a single "last message" field.
@@ -121,11 +292,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
         }
         $updateQuery = "UPDATE disease_cases SET status = '$new_status', remarks = '$remarks', updated_at = NOW() $severitySql $personnelSql WHERE reference_id = '$ref_esc'";
         if(mysqli_query($conn, $updateQuery)) {
-            echo "<script>alert('Intelligence Update Saved!'); window.location='reports.php?view=disease&tab=" . $new_status . "';</script>";
+            casd_alert_redirect('success', 'Intelligence Update Saved', 'The case status and remarks were saved successfully.', 'reports.php?view=disease&tab=' . $new_status, 2200);
             exit;
         }
     } else {
-        echo "<script>alert('Invalid status change — cases can only move forward: Pending → Verified → Resolved.'); window.location='reports.php?view=disease&tab=" . ($cur_status ?? 'pending') . "';</script>";
+        casd_alert_redirect('error', 'Invalid Status Change', "Cases can only move forward:\nPending → Verified → Resolved.", 'reports.php?view=disease&tab=' . ($cur_status ?? 'pending'));
         exit;
     }
 }
@@ -204,7 +375,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['reassign_disease'])) {
         echo "<script>window.location='reports.php?view=disease&tab=pending&case_id=" . $case_id . "';</script>";
         exit;
     } else {
-        echo "<script>alert('This can only be done for Pending, Other / Unidentified reports.'); window.location='reports.php?view=disease&tab=pending&case_id=" . $case_id . "';</script>";
+        casd_alert_redirect('warning', 'Action Not Available', 'This can only be done for Pending, Other / Unidentified reports.', 'reports.php?view=disease&tab=pending&case_id=' . $case_id);
         exit;
     }
 }
@@ -760,6 +931,7 @@ $tableRows = [];
        and the reportPopIn animation they use) now lives in review.php,
        rendered by render_review_modal(). */
 </style>
+<?php casd_dialog_assets(); ?>
 
 <!-- ═══ REPORT TYPE SWITCHER ═══
      Always visible at the top, regardless of which view is active. This is the
