@@ -7,6 +7,7 @@ $conn = new mysqli('localhost', 'root', '882372', 'corncasd_db');
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
+$conn->set_charset('utf8mb4'); // so names like "Bañadero" come through intact
 
 // ── STAT: Total Farmers ──
 $totalFarmers = 0;
@@ -14,15 +15,21 @@ $f = $conn->query("SELECT COUNT(*) AS cnt FROM farmers WHERE status = 'active'")
 if ($f) { $totalFarmers = $f->fetch_assoc()['cnt']; }
 
 
-// ── STAT: Active Reports (pending + verified) ──
+// ── STAT: Active Reports (pending + verified) — manual reports only; AI scans
+// don't need review, so they're excluded here and counted separately below. ──
 $totalActiveReports = 0;
-$r = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status IN ('pending','verified')");
+$r = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
 if ($r) { $totalActiveReports = $r->fetch_assoc()['cnt']; }
 
-// ── STAT: Verified Cases ──
+// ── STAT: Verified Cases (manual reports only) ──
 $totalVerifiedCases = 0;
-$v = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'verified'");
+$v = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
 if ($v) { $totalVerifiedCases = $v->fetch_assoc()['cnt']; }
+
+// ── STAT: AI Scans — auto-classified cases that don't require review ──
+$totalAiScans = 0;
+$as = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
+if ($as) { $totalAiScans = $as->fetch_assoc()['cnt']; }
 
 // ── BUILD BARANGAY DATA ──
 $barangayData = [];
@@ -33,69 +40,96 @@ if ($brgy_res) {
         $brgy_id   = (int)$row['id'];
         $brgy_name = $row['name'];
 
-        $counts_res = $conn->query("
-            SELECT dc.status, COUNT(*) AS cnt
-            FROM disease_cases dc
-            WHERE dc.barangay_id = $brgy_id
-              AND dc.status IN ('pending','verified')
-            GROUP BY dc.status
-        ");
-
-        $pending_count  = 0;
-        $verified_count = 0;
-        if ($counts_res) {
-            while ($c = $counts_res->fetch_assoc()) {
-                if ($c['status'] === 'pending')  $pending_count  = (int)$c['cnt'];
-                if ($c['status'] === 'verified') $verified_count = (int)$c['cnt'];
-            }
-        }
-
-        $total_active = $pending_count + $verified_count;
-
-        $highlight = 'none';
-        if ($verified_count > 0 && $pending_count > 0) $highlight = 'mixed';
-        elseif ($verified_count > 0)                    $highlight = 'verified';
-        elseif ($pending_count > 0)                     $highlight = 'pending';
-
-        $cases = [];
+        // Single query for both the counts and the case list — AI-scanned cases
+        // (source = 'scan') don't need review, so they're tallied separately as
+        // ai_scan_count instead of being folded into pending/verified/resolved.
         $cases_res = $conn->query("
             SELECT dc.case_id, dc.reference_id, dc.status, dc.report_date,
                    dc.severity, dc.plants_affected, dc.total_plants,
                    dc.infection_percentage, dc.description, dc.photo_evidence,
-                   d.disease_name
+                   dc.source, dc.farmer_id, f.farmer_name AS farmer_name_db, d.disease_name
             FROM disease_cases dc
             LEFT JOIN diseases d ON dc.disease_id = d.disease_id
+            LEFT JOIN farmers f  ON f.farmer_id = dc.farmer_id
             WHERE dc.barangay_id = $brgy_id
-              AND dc.status IN ('pending','verified')
+              AND dc.status IN ('pending','verified','resolved')
             ORDER BY dc.report_date DESC
         ");
+
+        $pending_count  = 0;
+        $verified_count = 0;
+        $resolved_count = 0;
+        $ai_scan_count  = 0;
+        $cases = [];
         if ($cases_res) {
             while ($c = $cases_res->fetch_assoc()) {
+                $isAiScan = ($c['source'] === 'scan');
+
+                if ($isAiScan) {
+                    $ai_scan_count++;
+                } else {
+                    if ($c['status'] === 'pending')  $pending_count++;
+                    if ($c['status'] === 'verified') $verified_count++;
+                    if ($c['status'] === 'resolved') $resolved_count++;
+                }
+
                 $farmerName = null;
                 if (preg_match('/^\[FARMER:(.+?)\]\n?/s', $c['description'] ?? '', $m)) {
                     $farmerName = trim($m[1]);
+                } elseif (!empty($c['farmer_name_db'])) {
+                    $farmerName = $c['farmer_name_db'];
                 }
                 $c['farmer_name'] = $farmerName;
                 $c['description'] = preg_replace('/^\[FARMER:.+?\]\n?/s', '', $c['description'] ?? '');
+
+                // AI scans carry the detected label + confidence in the description text
+                // (e.g. "AI scan: Corn___Common_Rust detected. Confidence: 92.2%") instead
+                // of a disease_id, so pull it out for display.
+                $c['ai_label']      = null;
+                $c['ai_confidence'] = null;
+                if ($isAiScan) {
+                    if (preg_match('/AI scan:\s*(.+?)\s+detected\b/i', (string)$c['description'], $lm)) {
+                        $c['ai_label'] = trim(str_replace('_', ' ', preg_replace('/^Corn_+/i', '', trim($lm[1]))));
+                    }
+                    if (preg_match('/Confidence:\s*([\d.]+)\s*%/i', (string)$c['description'], $cm)) {
+                        $c['ai_confidence'] = rtrim(rtrim(number_format((float)$cm[1], 1), '0'), '.') . '%';
+                    }
+                }
+
+                $c['is_ai_scan']  = $isAiScan;
                 $cases[] = $c;
             }
         }
+
+        $total_active = $pending_count + $verified_count;
+        $total_all    = $total_active + $resolved_count + $ai_scan_count;
+
+        // Highlight state is driven only by cases that actually need review —
+        // AI scans never push a barangay into the "waiting for review" glow.
+        // Pending takes priority over verified: a barangay with any pending case
+        // still needs attention, so there's no separate "mixed" state.
+        $highlight = 'none';
+        if ($pending_count > 0)       $highlight = 'pending';
+        elseif ($verified_count > 0)  $highlight = 'verified';
 
         $barangayData[$brgy_id] = [
             'name'            => $brgy_name,
             'highlight'       => $highlight,
             'pending_count'   => $pending_count,
             'verified_count'  => $verified_count,
+            'resolved_count'  => $resolved_count,
+            'ai_scan_count'   => $ai_scan_count,
             'total_active'    => $total_active,
-            'has_report'      => $total_active > 0,
+            'total_all'       => $total_all,
+            'has_report'      => ($total_active > 0 || $ai_scan_count > 0),
             'cases'           => $cases,
         ];
     }
 }
 
-// ── STAT: Pending Cases ──
+// ── STAT: Pending Cases (manual reports only — AI scans never need review) ──
 $totalPendingCases = 0;
-$pq = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'pending'");
+$pq = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
 if ($pq) { $totalPendingCases = $pq->fetch_assoc()['cnt']; }
 
 $conn->close();
@@ -135,15 +169,15 @@ main { display: flex; width: 100%; height: 100vh; }
 /* ── PENDING BLINK ANIMATION ── */
 @keyframes pendingBlink {
     0%,100% {
-        filter: drop-shadow(0 0 5px rgba(239,68,68,1))
-                drop-shadow(0 0 14px rgba(239,68,68,0.85))
-                drop-shadow(0 0 28px rgba(239,68,68,0.5));
-        stroke: rgba(239,68,68,1);
+        filter: drop-shadow(0 0 5px rgba(249,115,22,1))
+                drop-shadow(0 0 14px rgba(249,115,22,0.85))
+                drop-shadow(0 0 28px rgba(249,115,22,0.5));
+        stroke: rgba(249,115,22,1);
         opacity: 1;
     }
     50% {
-        filter: drop-shadow(0 0 2px rgba(239,68,68,0.25));
-        stroke: rgba(239,68,68,0.35);
+        filter: drop-shadow(0 0 2px rgba(249,115,22,0.25));
+        stroke: rgba(249,115,22,0.35);
         opacity: 0.7;
     }
 }
@@ -158,17 +192,12 @@ main { display: flex; width: 100%; height: 100vh; }
     stroke: rgba(59,130,246,0.8);
     stroke-width: 1px;
 }
-#map-3d-wrap svg path.status-mixed {
-    filter: drop-shadow(0 0 6px rgba(245,158,11,0.9)) drop-shadow(0 0 14px rgba(245,158,11,0.6));
-    stroke: rgba(245,158,11,0.8);
-    stroke-width: 1px;
-}
 #map-3d-wrap svg path.status-pending:hover {
     animation: none;
     filter: brightness(1.6)
-            drop-shadow(0 10px 18px rgba(239,68,68,0.8))
-            drop-shadow(0 0 20px rgba(239,68,68,0.5));
-    stroke: #ff6b6b;
+            drop-shadow(0 10px 18px rgba(249,115,22,0.8))
+            drop-shadow(0 0 20px rgba(249,115,22,0.5));
+    stroke: #fdba74;
 }
 .brgy-badge {
     position: absolute;
@@ -263,103 +292,120 @@ main { display: flex; width: 100%; height: 100vh; }
     background: rgba(15,23,42,0.4);
 }
 
-/* ── scrollbar override for the dark case box ── */
-#brgy-case-box ::-webkit-scrollbar { display: none; }
-
-/* ── REPORT TABS (switch between multiple reports in a barangay, no scroll list) ── */
-.brgy-tabs {
+/* ── STATUS TABS (All / Pending / Verified / Resolved, with counts) ── */
+.brgy-status-tabs {
     display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    padding-bottom: 12px;
-    margin-bottom: 12px;
-    border-bottom: 1px solid #263449;
-}
-.brgy-tab {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: #1e293b;
-    color: #cbd5e1;
-    border: 1px solid #2f3e56;
-    border-radius: 999px;
-    padding: 6px 12px;
-    font-size: 0.72rem;
-    font-weight: 800;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background .15s ease, color .15s ease, border-color .15s ease;
-    font-family: inherit;
-}
-.brgy-tab-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 999px;
+    align-items: stretch;
+    gap: 0;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 4px;
+    margin: 16px 0 12px;
     flex-shrink: 0;
 }
-.brgy-tab.active-tab {
-    background: #ffffff;
-    color: #0f172a;
-    border-color: #ffffff;
-}
-.brgy-case-panel { display: none; }
-.brgy-case-panel.active-panel { display: block; }
-
-/* ── PRIORITY FILTER (filter reports by severity so the most urgent stand out) ── */
-.brgy-filters {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 12px;
-}
-.brgy-filters-label {
-    color: #64748b;
-    font-size: 0.6rem;
-    font-weight: 900;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    margin-right: 2px;
-    flex-shrink: 0;
-}
-.brgy-filter {
-    flex-shrink: 0;
+.brgy-status-tab {
+    flex: 1;
     display: flex;
     align-items: center;
-    gap: 5px;
+    justify-content: center;
+    gap: 6px;
     background: transparent;
-    color: #cbd5e1;
-    border: 1px solid #2f3e56;
-    border-radius: 999px;
-    padding: 5px 11px;
+    border: none;
+    color: #64748b;
     font-size: 0.68rem;
     font-weight: 800;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    padding: 8px 6px;
+    border-radius: 9px;
     cursor: pointer;
     font-family: inherit;
-    transition: background .15s ease, color .15s ease, border-color .15s ease;
+    white-space: nowrap;
+    transition: background .15s ease, color .15s ease;
 }
-.brgy-filter-count {
-    background: rgba(255,255,255,0.1);
-    color: #cbd5e1;
-    border-radius: 999px;
-    padding: 1px 6px;
-    font-size: 0.62rem;
+.brgy-status-tab-count {
+    font-size: 0.68rem;
+    font-weight: 900;
 }
-.brgy-filter.active-filter {
-    background: #ffffff;
-    color: #0f172a !important;
-    border-color: #ffffff;
+.brgy-status-tab.active-status-tab {
+    background: #0f172a;
+    color: #ffffff;
 }
-.brgy-filter.active-filter .brgy-filter-count {
-    background: rgba(15,23,42,0.1);
+
+/* ── SEARCH + DATE ROW ── */
+.brgy-search-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+    flex-shrink: 0;
+}
+.brgy-search-wrap, .brgy-date-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.brgy-search-wrap { flex: 1; min-width: 0; }
+.brgy-search-wrap svg, .brgy-date-wrap svg {
+    position: absolute;
+    left: 11px;
+    width: 14px;
+    height: 14px;
+    color: #94a3b8;
+    pointer-events: none;
+}
+.brgy-search-input, .brgy-date-input {
+    width: 100%;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 9px 12px 9px 32px;
+    font-size: 0.78rem;
+    font-weight: 600;
     color: #0f172a;
+    font-family: inherit;
+}
+.brgy-search-input:focus, .brgy-date-input:focus { outline: none; border-color: #94a3b8; }
+.brgy-date-wrap { flex-shrink: 0; width: 140px; }
+
+/* ── REPORT LIST + CARDS ── */
+.brgy-report-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.brgy-report-card {
+    display: flex;
+    gap: 10px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    padding: 12px 14px;
+}
+.brgy-report-icon {
+    width: 26px;
+    height: 26px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+.brgy-report-icon svg { width: 14px; height: 14px; }
+.brgy-no-match, .brgy-no-cases {
+    color: #94a3b8;
+    font-size: 0.82rem;
+    padding: 20px 0;
+    text-align: center;
 }
 
 /* ── RESPONSIVE: smaller popup padding & controls on narrow screens ── */
 @media (max-width: 480px) {
     #brgy-popup { padding: 22px 18px 20px; }
-    .brgy-tab, .brgy-filter { font-size: 0.66rem; padding: 5px 10px; }
+    .brgy-status-tab { font-size: 0.6rem; padding: 7px 4px; }
+    .brgy-search-row { flex-direction: column; }
+    .brgy-date-wrap { width: 100%; }
 }
 
 /* ── DISEASE CASE PHOTO LIGHTBOX ── */
@@ -427,6 +473,13 @@ main { display: flex; width: 100%; height: 100vh; }
 .dcard-bar { height: 3px; background: rgba(0,0,0,0.06); border-radius: 999px; overflow: hidden; }
 .dcard-bar div { height: 100%; border-radius: 999px; transition: width 1s ease; }
 
+@media (max-width: 1100px) {
+    #dashboard-stat-grid { grid-template-columns: repeat(3,1fr) !important; }
+}
+@media (max-width: 640px) {
+    #dashboard-stat-grid { grid-template-columns: repeat(2,1fr) !important; }
+}
+
 /* ── MAP FILTER STATES ── */
 #map-3d-wrap svg path.map-dimmed {
     opacity: 0.18;
@@ -434,30 +487,30 @@ main { display: flex; width: 100%; height: 100vh; }
     animation: none !important;
 }
 #map-3d-wrap svg path.map-highlighted-active {
-    fill: #facc15 !important;
-    filter: drop-shadow(0 0 8px rgba(250,204,21,1))
-            drop-shadow(0 0 20px rgba(250,204,21,0.85))
-            drop-shadow(0 0 40px rgba(250,204,21,0.5)) !important;
-    stroke: #fde68a !important;
+    fill: #16a34a !important;
+    filter: drop-shadow(0 0 8px rgba(22,163,74,1))
+            drop-shadow(0 0 20px rgba(22,163,74,0.85))
+            drop-shadow(0 0 40px rgba(22,163,74,0.5)) !important;
+    stroke: #86efac !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
     animation: none !important;
 }
 #map-3d-wrap svg path.map-highlighted-pending {
-    fill: #ff1a1a !important;
-    filter: drop-shadow(0 0 8px rgba(255,26,26,1))
-            drop-shadow(0 0 20px rgba(255,26,26,0.85))
-            drop-shadow(0 0 40px rgba(255,26,26,0.5)) !important;
-    stroke: #ff6666 !important;
+    fill: #f97316 !important;
+    filter: drop-shadow(0 0 8px rgba(249,115,22,1))
+            drop-shadow(0 0 20px rgba(249,115,22,0.85))
+            drop-shadow(0 0 40px rgba(249,115,22,0.5)) !important;
+    stroke: #fdba74 !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
 #map-3d-wrap svg path.map-highlighted-verified {
-    fill: #1a6aff !important;
-    filter: drop-shadow(0 0 8px rgba(26,106,255,1))
-            drop-shadow(0 0 20px rgba(26,106,255,0.85))
-            drop-shadow(0 0 40px rgba(26,106,255,0.5)) !important;
-    stroke: #66aaff !important;
+    fill: #3b82f6 !important;
+    filter: drop-shadow(0 0 8px rgba(59,130,246,1))
+            drop-shadow(0 0 20px rgba(59,130,246,0.85))
+            drop-shadow(0 0 40px rgba(59,130,246,0.5)) !important;
+    stroke: #93c5fd !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
@@ -470,10 +523,21 @@ main { display: flex; width: 100%; height: 100vh; }
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
+#map-3d-wrap svg path.map-highlighted-scan {
+    fill: #8b5cf6 !important;
+    filter: drop-shadow(0 0 8px rgba(139,92,246,1))
+            drop-shadow(0 0 20px rgba(139,92,246,0.85))
+            drop-shadow(0 0 40px rgba(139,92,246,0.5)) !important;
+    stroke: #c4b5fd !important;
+    stroke-width: 1.5px !important;
+    opacity: 1 !important;
+    animation: none !important;
+}
 #map-3d-wrap svg path.map-highlighted-active:hover,
 #map-3d-wrap svg path.map-highlighted-pending:hover,
 #map-3d-wrap svg path.map-highlighted-verified:hover,
-#map-3d-wrap svg path.map-highlighted-affected:hover {
+#map-3d-wrap svg path.map-highlighted-affected:hover,
+#map-3d-wrap svg path.map-highlighted-scan:hover {
     transform: translateY(-12px) scale(1.05) !important;
     animation: none !important;
 }
@@ -497,7 +561,7 @@ main { display: flex; width: 100%; height: 100vh; }
 </div>
 
 <!-- ── STAT CARDS ── -->
-<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;">
+<div id="dashboard-stat-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:20px;">
 
     <!-- Farmers -->
     <div class="dcard" style="--accent:#10b981;--accent-bg:rgba(16,185,129,0.08);--accent-border:rgba(16,185,129,0.2);">
@@ -544,18 +608,32 @@ main { display: flex; width: 100%; height: 100vh; }
     </div>
 
     <!-- Active Reports -->
-    <div class="dcard filterable" data-filter="active" style="--accent:#f59e0b;--accent-bg:rgba(245,158,11,0.08);--accent-border:rgba(245,158,11,0.2);--accent-color:#f59e0b;">
+    <div class="dcard filterable" data-filter="active" style="--accent:#16a34a;--accent-bg:rgba(22,163,74,0.08);--accent-border:rgba(22,163,74,0.2);--accent-color:#16a34a;">
         <div class="dcard-shine"></div>
         <div class="dcard-top">
-            <div class="dcard-iconbox" style="background:rgba(245,158,11,0.12);color:#f59e0b;">
+            <div class="dcard-iconbox" style="background:rgba(22,163,74,0.12);color:#16a34a;">
                 <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
             </div>
-            <span class="dcard-badge" style="color:#f59e0b;background:rgba(245,158,11,0.1);">Needs Review</span>
+            <span class="dcard-badge" style="color:#16a34a;background:rgba(22,163,74,0.1);">Needs Review</span>
         </div>
         <strong class="dcard-num"><?php echo number_format($totalActiveReports); ?></strong>
         <p class="dcard-label">Active Reports</p>
-        <div class="dcard-bar"><div style="width:<?php echo min(100,($totalActiveReports/50)*100); ?>%;background:#f59e0b;"></div></div>
-        <p style="font-size:9px;color:#f59e0b;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;margin-top:8px;opacity:0.7;">▼ Click to filter map</p>
+        <div class="dcard-bar"><div style="width:<?php echo min(100,($totalActiveReports/50)*100); ?>%;background:#16a34a;"></div></div>
+        <p style="font-size:9px;color:#16a34a;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;margin-top:8px;opacity:0.7;">▼ Click to filter map</p>
+    </div>
+
+    <!-- AI Scans -->
+    <div class="dcard filterable" data-filter="ai_scan" style="--accent:#8b5cf6;--accent-bg:rgba(139,92,246,0.08);--accent-border:rgba(139,92,246,0.2);--accent-color:#8b5cf6;">
+        <div class="dcard-shine"></div>
+        <div class="dcard-top">
+            <div class="dcard-iconbox" style="background:rgba(139,92,246,0.12);color:#8b5cf6;">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2M12 8v8m-4-4h8"/></svg>
+            </div>
+        </div>
+        <strong class="dcard-num"><?php echo number_format($totalAiScans); ?></strong>
+        <p class="dcard-label">AI Scans</p>
+        <div class="dcard-bar"><div style="width:<?php echo min(100,($totalAiScans/50)*100); ?>%;background:#8b5cf6;"></div></div>
+        <p style="font-size:9px;color:#8b5cf6;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;margin-top:8px;opacity:0.7;">▼ Click to filter map</p>
     </div>
 
 </div>
@@ -567,9 +645,9 @@ main { display: flex; width: 100%; height: 100vh; }
     <!-- Legend -->
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-shrink:0;">
         <div class="map-legend">
-            <span><span class="legend-dot" style="background:#ef4444;box-shadow:0 0 6px #ef4444;"></span>Pending Cases</span>
+            <span><span class="legend-dot" style="background:#f97316;box-shadow:0 0 6px #f97316;"></span>Pending Cases</span>
             <span><span class="legend-dot" style="background:#3b82f6;box-shadow:0 0 6px #3b82f6;"></span>Verified Cases</span>
-            <span><span class="legend-dot" style="background:#f59e0b;box-shadow:0 0 6px #f59e0b;"></span>Pending + Verified</span>
+            <span><span class="legend-dot" style="background:#8b5cf6;box-shadow:0 0 6px #8b5cf6;"></span>AI Scans</span>
             <span><span class="legend-dot" style="background:#22c55e;"></span>No Active Cases</span>
         </div>
         <div style="font-size:10px;color:rgba(255,255,255,0.6);font-weight:700;">Click a barangay for details</div>
@@ -660,10 +738,23 @@ main { display: flex; width: 100%; height: 100vh; }
 </div>
 
 <script>
-const barangayData = <?php echo json_encode($barangayData); ?>;
+const barangayData = <?php echo json_encode($barangayData, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_UNICODE); ?>;
+
+// ── Shared state for the currently-open barangay popup's report list ──
+let currentBrgyCases = [];
+let currentBrgyName  = '';
+let brgyFilterState  = { status: 'all', search: '', date: '' };
 
 function normalizeName(str) {
-    return str.replace(/_/g, ' ').trim().toUpperCase();
+    // Strip accents so "Bañadero" (DB) matches the SVG path id "BANADERO".
+    // Also repairs the common mojibake form of ñ/Ñ ("Ã±" / "Ã‘") just in case.
+    return String(str)
+        .replace(/Ã±/g, 'n').replace(/Ã‘/g, 'N')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/_/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toUpperCase();
 }
 
 function findBarangayByPathId(pathId) {
@@ -698,18 +789,20 @@ function applyMapFilter(filterType) {
     allPaths.forEach(path => {
         const match = findBarangayByPathId(path.id);
         const data  = match ? match.data : null;
-        path.classList.remove('map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected');
+        path.classList.remove('map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected','map-highlighted-scan');
 
         let qualifies = false;
         if (filterType === 'active'   && data && data.total_active   > 0) qualifies = true;
         if (filterType === 'pending'  && data && data.pending_count  > 0) qualifies = true;
         if (filterType === 'verified' && data && data.verified_count > 0) qualifies = true;
         if (filterType === 'affected' && data && data.total_active   > 0) qualifies = true;
+        if (filterType === 'ai_scan'  && data && data.ai_scan_count  > 0) qualifies = true;
 
         if (qualifies) {
             const cls = filterType === 'active'   ? 'map-highlighted-active'
                       : filterType === 'pending'  ? 'map-highlighted-pending'
                       : filterType === 'verified' ? 'map-highlighted-verified'
+                      : filterType === 'ai_scan'  ? 'map-highlighted-scan'
                       :                             'map-highlighted-affected';
             path.classList.add(cls);
         } else {
@@ -740,11 +833,36 @@ const label = document.getElementById('brgy-label');
 document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
     path.addEventListener('mouseenter', function() {
         const match = findBarangayByPathId(this.id);
-        const name  = match ? match.data.name : this.id.replace(/_/g, ' ');
-        const total = match ? match.data.total_active : 0;
-        const isPending = match && match.data.highlight === 'pending';
-        label.innerHTML = name.toUpperCase() +
-            (total > 0 ? ` <span style="font-size:10px;background:${isPending?'#ef4444':'#3b82f6'};color:#fff;padding:1px 6px;border-radius:999px;margin-left:6px;">${total} case${total>1?'s':''}</span>` : '');
+        const name = match ? match.data.name : this.id.replace(/_/g, ' ');
+        const data = match ? match.data : null;
+        let badge = '';
+
+        if (activeFilter && data) {
+            // A map filter is active — show the count for THAT filter only, so a barangay
+            // highlighted under "Pending" reads as pending cases, not its overall total.
+            const filterInfo = {
+                pending:  { count: data.pending_count,  color: '#f97316', label: 'pending',  plural: false },
+                verified: { count: data.verified_count, color: '#3b82f6', label: 'verified', plural: false },
+                active:   { count: data.total_active,   color: '#16a34a', label: 'active',   plural: false },
+                ai_scan:  { count: data.ai_scan_count,  color: '#8b5cf6', label: 'AI scan',  plural: true  },
+            }[activeFilter];
+            if (filterInfo && filterInfo.count > 0) {
+                const suffix = (filterInfo.plural && filterInfo.count > 1) ? 's' : '';
+                badge = ` <span style="font-size:10px;background:${filterInfo.color};color:#fff;padding:1px 6px;border-radius:999px;margin-left:6px;">${filterInfo.count} ${filterInfo.label}${suffix}</span>`;
+            }
+        } else {
+            // No filter active — default to the barangay's overall status.
+            const total   = data ? data.total_active  : 0;
+            const scanCnt = data ? data.ai_scan_count : 0;
+            const isPending = data && data.highlight === 'pending';
+            if (total > 0) {
+                badge = ` <span style="font-size:10px;background:${isPending?'#f97316':'#3b82f6'};color:#fff;padding:1px 6px;border-radius:999px;margin-left:6px;">${total} case${total>1?'s':''}</span>`;
+            } else if (scanCnt > 0) {
+                badge = ` <span style="font-size:10px;background:#8b5cf6;color:#fff;padding:1px 6px;border-radius:999px;margin-left:6px;">${scanCnt} AI scan${scanCnt>1?'s':''}</span>`;
+            }
+        }
+
+        label.innerHTML = name.toUpperCase() + badge;
         label.style.display = 'block';
         label.style.opacity = '1';
     });
@@ -775,9 +893,9 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
         let statusLabel = 'NO REPORTS YET';
         let statusColor = '#16a34a';
         if (data) {
-            if (data.highlight === 'pending')  { statusLabel = 'WAITING FOR REVIEW';         statusColor = '#dc2626'; }
-            if (data.highlight === 'verified') { statusLabel = 'CONFIRMED CASES';            statusColor = '#2563eb'; }
-            if (data.highlight === 'mixed')    { statusLabel = 'SOME WAITING, SOME CONFIRMED'; statusColor = '#d97706'; }
+            if (data.highlight === 'pending')  { statusLabel = 'PENDING';         statusColor = '#f97316'; }
+            if (data.highlight === 'verified') { statusLabel = 'CONFIRMED CASES'; statusColor = '#3b82f6'; }
+            if (data.highlight === 'none' && data.ai_scan_count > 0) { statusLabel = 'AI SCANS ONLY — NO REVIEW NEEDED'; statusColor = '#8b5cf6'; }
         }
         const statusPill = `<span style="display:inline-flex;align-items:center;gap:5px;background:${statusColor}17;color:${statusColor};font-size:9px;font-weight:900;padding:3px 10px;border-radius:999px;letter-spacing:0.1em;white-space:nowrap;">
             <span style="width:6px;height:6px;border-radius:999px;background:${statusColor};flex-shrink:0;"></span>${statusLabel}
@@ -787,183 +905,73 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
         const verifiedCount = data ? data.verified_count : 0;
         const totalActive   = data ? data.total_active   : 0;
 
-        // ── Info grid — mirrors the "Full Name / Username" rows in the reference design ──
-        const infoGridHtml = `
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px 24px;padding:18px 0;border-bottom:1px solid #f1f5f9;flex-shrink:0;">
-            <div>
-                <p style="color:#94a3b8;font-size:0.6rem;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;margin:0 0 4px;">Barangay</p>
-                <p style="color:#0f172a;font-size:0.95rem;font-weight:800;margin:0;">${brgyName}</p>
+        const resolvedCount = data ? data.resolved_count : 0;
+        const aiScanCount   = data ? data.ai_scan_count  : 0;
+
+        // ── State for this popup instance: the card list re-renders client-side as the
+        // person types a search, picks a date, or switches status tabs — no reload needed.
+        // If a map filter card (Pending / Verified / AI Scans) is currently active, open the
+        // popup straight into that tab instead of All, so the click goes right to the
+        // filtered data. "Active Reports" spans two tabs (pending+verified) so it still opens on All. ──
+        const filterTabMap  = { pending: 'pending', verified: 'verified', ai_scan: 'ai_scan' };
+        const initialStatus = filterTabMap[activeFilter] || 'all';
+        currentBrgyCases = (data && data.cases) ? data.cases : [];
+        currentBrgyName  = brgyName;
+        brgyFilterState  = { status: initialStatus, search: '', date: '' };
+
+        // ── Status tabs — All / Pending / Verified / Resolved / AI Scans, each with its live count.
+        // "All" covers manual reports only — AI scans are their own tab since they never
+        // move through the pending/verified/resolved review flow. ──
+        const statusTabDefs = [
+            { key: 'all',      label: 'All',      count: pendingCount + verifiedCount + resolvedCount },
+            { key: 'pending',  label: 'Pending',  count: pendingCount },
+            { key: 'verified', label: 'Verified', count: verifiedCount },
+            { key: 'resolved', label: 'Resolved', count: resolvedCount },
+            { key: 'ai_scan',  label: 'AI Scans', count: aiScanCount },
+        ];
+        const statusTabsHtml = `<div class="brgy-status-tabs">${statusTabDefs.map(t => `
+            <button type="button" class="brgy-status-tab${t.key === initialStatus ? ' active-status-tab' : ''}" data-status="${t.key}" onclick="event.stopPropagation();setBrgyStatusFilter('${t.key}');">
+                ${t.label}<span class="brgy-status-tab-count">&nbsp;${t.count}</span>
+            </button>`).join('')}</div>`;
+
+        // ── Search + date row ──
+        const searchRowHtml = `
+        <div class="brgy-search-row">
+            <div class="brgy-search-wrap">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 10a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                <input type="text" id="brgy-search-input" class="brgy-search-input" placeholder="Search by farmer, report number, or crop..." onclick="event.stopPropagation();" oninput="event.stopPropagation();onBrgySearchInput(this.value);">
             </div>
-            <div>
-                <p style="color:#94a3b8;font-size:0.6rem;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;margin:0 0 4px;">Total Reports</p>
-                <p style="color:#0f172a;font-size:0.95rem;font-weight:800;margin:0;">${totalActive}</p>
-            </div>
-            <div>
-                <p style="color:#94a3b8;font-size:0.6rem;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;margin:0 0 4px;">Waiting for Review</p>
-                <p style="color:${pendingCount > 0 ? '#dc2626' : '#0f172a'};font-size:0.95rem;font-weight:800;margin:0;">${pendingCount}</p>
-            </div>
-            <div>
-                <p style="color:#94a3b8;font-size:0.6rem;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;margin:0 0 4px;">Confirmed</p>
-                <p style="color:${verifiedCount > 0 ? '#2563eb' : '#0f172a'};font-size:0.95rem;font-weight:800;margin:0;">${verifiedCount}</p>
+            <div class="brgy-date-wrap">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                <input type="date" id="brgy-date-input" class="brgy-date-input" onclick="event.stopPropagation();" onchange="event.stopPropagation();onBrgyDateInput(this.value);">
             </div>
         </div>`;
-
-        // ── Case tabs + panels (rendered inside the dark card, like the "Login Account" box in the reference) ──
-        // Instead of stacking every report into one long scrolling list, each report gets its own
-        // tab so switching between multiple reports in the barangay doesn't require scrolling.
-        const severityRank  = {critical: 4, high: 3, moderate: 2, low: 1};
-
-        let tabsHtml = '';
-        let filterHtml = '';
-        let panelsHtml = '';
-        if (data && data.cases && data.cases.length > 0) {
-            // Priority sort: higher severity and still-pending reports surface first.
-            const sortedCases = [...data.cases].sort((a, b) => {
-                const pa = (severityRank[a.severity] || 0) + (a.status === 'pending' ? 0.5 : 0);
-                const pb = (severityRank[b.severity] || 0) + (b.status === 'pending' ? 0.5 : 0);
-                return pb - pa;
-            });
-
-            if (sortedCases.length > 1) {
-                const counts = {critical: 0, high: 0, moderate: 0, low: 0};
-                sortedCases.forEach(c => { if (counts[c.severity] !== undefined) counts[c.severity]++; });
-                const filterDefs = [
-                    {key: 'all',      label: 'All' },
-                    {key: 'critical', label: 'Critical' },
-                    {key: 'high',     label: 'High' },
-                    {key: 'moderate', label: 'Moderate' },
-                    {key: 'low',      label: 'Low' },
-                ].filter(f => f.key === 'all' || counts[f.key] > 0);
-
-                filterHtml = `<div class="brgy-filters">
-                    <span class="brgy-filters-label">Prioritize</span>
-                    ${filterDefs.map(f => `<button type="button" class="brgy-filter${f.key === 'all' ? ' active-filter' : ''}" data-severity="${f.key}" onclick="event.stopPropagation();filterBrgyCases(this,'${f.key}');">
-                        ${f.label}<span class="brgy-filter-count">${f.key === 'all' ? sortedCases.length : counts[f.key]}</span>
-                    </button>`).join('')}
-                </div>`;
-
-                tabsHtml = `<div class="brgy-tabs">${sortedCases.map((c, i) => {
-                    const dotColor = c.status === 'pending' ? '#f87171' : '#60a5fa';
-                    const tabTitle = `${c.disease_name || 'Unknown Disease'}${c.report_date ? ' • ' + c.report_date : ''}`;
-                    return `<button type="button" class="brgy-tab${i === 0 ? ' active-tab' : ''}" data-idx="${i}" data-severity="${c.severity || ''}" title="${tabTitle}" onclick="event.stopPropagation();showBrgyCaseTab(this,${i});">
-                        <span class="brgy-tab-dot" style="background:${dotColor};"></span>
-                        Report ${i + 1}
-                    </button>`;
-                }).join('')}</div>`;
-            }
-            panelsHtml = sortedCases.map((c, i) => {
-                const isPending     = c.status === 'pending';
-                const statusColor2  = isPending ? '#f87171' : '#60a5fa';
-                const statusBg2     = isPending ? 'rgba(248,113,113,0.14)' : 'rgba(96,165,250,0.14)';
-                const statusTextMap = {pending: 'Waiting for Review', verified: 'Confirmed'};
-                const statusText2   = statusTextMap[c.status] || (c.status.charAt(0).toUpperCase()+c.status.slice(1));
-
-                // Infection rate badge — computed from infection_percentage, falling back to
-                // plants_affected / total_plants when the percentage wasn't recorded directly.
-                let infectionRate = null;
-                if (c.infection_percentage !== null && c.infection_percentage !== undefined && c.infection_percentage !== '') {
-                    infectionRate = parseFloat(c.infection_percentage);
-                } else if (c.plants_affected && c.total_plants) {
-                    infectionRate = (parseFloat(c.plants_affected) / parseFloat(c.total_plants)) * 100;
-                }
-                let rateColor = '#94a3b8';
-                if (infectionRate !== null && !isNaN(infectionRate)) {
-                    if (infectionRate >= 75)      rateColor = '#f87171';
-                    else if (infectionRate >= 50) rateColor = '#fb923c';
-                    else if (infectionRate >= 25) rateColor = '#fbbf24';
-                    else                          rateColor = '#34d399';
-                }
-                const rateText = (infectionRate !== null && !isNaN(infectionRate))
-                    ? `${infectionRate.toFixed(1)}% INFECTION RATE`
-                    : 'NO INFECTION DATA';
-
-                const photos = (c.photo_evidence || '').split(',').map(p => p.trim()).filter(Boolean);
-                const photosHtml = photos.length > 0 ? `
-                    <div style="display:flex;gap:8px;margin-bottom:10px;">
-                        ${photos.slice(0,3).map(p => `
-                        <img src="uploads/${p}" alt="Evidence photo"
-                             style="width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid #3f4f68;cursor:zoom-in;flex-shrink:0;"
-                             onclick="event.stopPropagation();openBrgyLightbox('uploads/${p}');">
-                        `).join('')}
-                        ${photos.length > 3 ? `<div style="width:64px;height:64px;border-radius:10px;background:#334155;border:1px solid #3f4f68;display:flex;align-items:center;justify-content:center;color:#e2e8f0;font-size:0.7rem;font-weight:800;flex-shrink:0;">+${photos.length - 3}</div>` : ''}
-                    </div>` : '';
-
-                return `
-                <div class="brgy-case-panel${i === 0 ? ' active-panel' : ''}" data-idx="${i}">
-                <div style="background:#1e293b;border:1px solid #2f3e56;border-radius:14px;padding:14px;">
-                    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">
-                        <span style="color:#fff;font-size:0.9rem;font-weight:800;">${c.disease_name || 'Unknown Disease'}</span>
-                        <span style="background:${statusBg2};color:${statusColor2};font-size:9px;font-weight:800;padding:3px 10px;border-radius:999px;white-space:nowrap;margin-left:8px;">${statusText2}</span>
-                    </div>
-                    ${c.farmer_name ? `
-                    <div style="background:#334155;border:1px solid #3f4f68;border-radius:10px;padding:10px 12px;margin-bottom:10px;">
-                        <div style="color:#94a3b8;font-size:0.58rem;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;line-height:1;">Reported by</div>
-                        <div style="color:#fff;font-size:0.82rem;font-weight:900;line-height:1.3;margin-top:2px;">${c.farmer_name}</div>
-                    </div>` : ''}
-                    ${photosHtml}
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-                        <span style="background:${rateColor}22;color:${rateColor};font-size:0.68rem;font-weight:800;text-transform:uppercase;padding:3px 9px;border-radius:6px;border:1px solid ${rateColor}44;">${rateText}</span>
-                        ${c.plants_affected ? `<span style="color:#cbd5e1;font-size:0.72rem;">${c.plants_affected} plants affected</span>` : ''}
-                    </div>
-                    ${c.report_date ? `<div style="color:#94a3b8;font-size:0.68rem;margin-bottom:10px;">${c.report_date}</div>` : ''}
-                    <div>
-                        <a href="reports.php?case_id=${c.case_id}&ref=${c.reference_id}"
-                           style="display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #fff;color:#0f172a;font-size:0.72rem;font-weight:800;padding:6px 14px;border-radius:8px;text-decoration:none;letter-spacing:0.05em;cursor:pointer;"
-                           onclick="event.stopPropagation();">
-                            View Full Report
-                        </a>
-                    </div>
-                </div>
-                </div>`;
-            }).join('');
-        } else {
-            panelsHtml = `<p style="color:#94a3b8;font-size:0.85rem;padding:10px 0;text-align:center;">No reports here yet.</p>`;
-        }
 
         const popup = document.getElementById('brgy-popup');
         popup.innerHTML = `
             <!-- Header -->
             <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:2px;flex-shrink:0;">
-                <div style="display:flex;gap:14px;align-items:flex-start;min-width:0;">
-                    <div style="min-width:0;">
-                        <p style="color:#94a3b8;font-size:0.6rem;font-weight:900;letter-spacing:0.18em;text-transform:uppercase;margin:2px 0 4px;">Crop Disease Report</p>
-                        <h3 style="color:#0f172a;font-size:1.4rem;font-weight:900;margin:0 0 6px;letter-spacing:-0.01em;">${brgyName}</h3>
-                        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                            <span style="color:#94a3b8;font-size:0.72rem;font-weight:700;">Calamba City</span>
-                            <span style="color:#cbd5e1;">&middot;</span>
-                            ${statusPill}
-                        </div>
+                <div style="min-width:0;">
+                    <p style="color:#94a3b8;font-size:0.6rem;font-weight:900;letter-spacing:0.18em;text-transform:uppercase;margin:2px 0 4px;">Crop Disease Report</p>
+                    <h3 style="color:#0f172a;font-size:1.4rem;font-weight:900;margin:0 0 6px;letter-spacing:-0.01em;">${brgyName}</h3>
+                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <span style="color:#94a3b8;font-size:0.72rem;font-weight:700;">Barangay: ${brgyName}, Calamba City</span>
+                        <span style="color:#cbd5e1;">&middot;</span>
+                        ${statusPill}
                     </div>
                 </div>
                 <button id="close-popup" style="width:34px;height:34px;border-radius:999px;background:#fff;border:1px solid #e2e8f0;color:#94a3b8;cursor:pointer;font-size:1rem;line-height:1;flex-shrink:0;margin-left:10px;">&#10005;</button>
             </div>
 
-            <!-- Info grid -->
-            ${infoGridHtml}
+            ${statusTabsHtml}
+            ${searchRowHtml}
 
-            <!-- Section label -->
-            <div style="display:flex;align-items:center;gap:6px;margin:16px 0 10px;flex-shrink:0;">
-                <svg style="width:13px;height:13px;" fill="none" viewBox="0 0 24 24" stroke="#0f172a" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                <span style="color:#0f172a;font-size:0.66rem;font-weight:900;text-transform:uppercase;letter-spacing:0.14em;">Reports in This Barangay</span>
-            </div>
-
-            <!-- Dark card holding the report tabs + selected report, mirrors the "Login Account" box -->
-            <div id="brgy-case-box" style="background:#0f172a;border-radius:16px;padding:14px;flex-shrink:0;">
-                ${filterHtml}
-                ${tabsHtml}
-                <div id="brgy-case-panels">
-                    ${panelsHtml}
-                </div>
-            </div>
-
-            <!-- Footer caption -->
-            <p style="text-align:center;color:#94a3b8;font-size:0.72rem;font-weight:600;margin:14px 0 0;flex-shrink:0;">
-                Tap <strong style="color:#0f172a;">View Full Report</strong> on any case above to see more details.
-            </p>
+            <!-- Scrollable list of report cards -->
+            <div id="brgy-report-list" class="brgy-report-list"></div>
 
             <!-- Footer buttons -->
-            <div style="display:flex;gap:10px;margin-top:12px;flex-shrink:0;">
-                ${data && data.total_active > 0 ? `
+            <div style="display:flex;gap:10px;margin-top:14px;flex-shrink:0;">
+                ${data && data.total_all > 0 ? `
                 <a href="reports.php?barangay_id=${match.id}"
                    style="flex:1;display:flex;align-items:center;justify-content:center;gap:8px;background:#0f172a;color:#fff;font-size:0.76rem;font-weight:800;padding:12px;border-radius:12px;text-decoration:none;letter-spacing:0.04em;"
                    onclick="event.stopPropagation();">
@@ -971,11 +979,13 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
                     View All Reports
                 </a>` : ''}
                 <button onclick="closePopup()"
-                   style="${data && data.total_active > 0 ? '' : 'flex:1;'}display:flex;align-items:center;justify-content:center;gap:8px;background:#fff;border:1px solid #fecaca;color:#dc2626;font-size:0.76rem;font-weight:800;padding:12px 20px;border-radius:12px;cursor:pointer;letter-spacing:0.04em;">
+                   style="${data && data.total_all > 0 ? '' : 'flex:1;'}display:flex;align-items:center;justify-content:center;gap:8px;background:#fff;border:1px solid #fecaca;color:#dc2626;font-size:0.76rem;font-weight:800;padding:12px 20px;border-radius:12px;cursor:pointer;letter-spacing:0.04em;">
                     Close
                 </button>
             </div>
         `;
+
+        renderBrgyReportList();
 
         document.getElementById('brgy-popup-overlay').style.display = 'block';
         document.getElementById('close-popup').addEventListener('click', closePopup);
@@ -986,46 +996,126 @@ function closePopup() {
     document.getElementById('brgy-popup-overlay').style.display = 'none';
 }
 
-// ── REPORT TABS: switch which report is shown, no scrolling through a list ──
-function showBrgyCaseTab(btn, idx) {
-    const box = btn.closest('#brgy-case-box');
-    if (!box) return;
-    box.querySelectorAll('.brgy-tab').forEach(t => t.classList.remove('active-tab'));
-    btn.classList.add('active-tab');
-    box.querySelectorAll('.brgy-case-panel').forEach(p => p.classList.remove('active-panel'));
-    const panel = box.querySelector(`.brgy-case-panel[data-idx="${idx}"]`);
-    if (panel) panel.classList.add('active-panel');
-    const noMatch = box.querySelector('.brgy-no-match');
-    if (noMatch) noMatch.remove();
+// ── STATUS FILTER: All / Pending / Verified / Resolved — drives both the tab row and the quick-filter pills ──
+function setBrgyStatusFilter(status) {
+    brgyFilterState.status = status;
+    document.querySelectorAll('.brgy-status-tab').forEach(t => t.classList.toggle('active-status-tab', t.dataset.status === status));
+    renderBrgyReportList();
 }
 
-// ── PRIORITY FILTER: narrow the tabs down to a severity level so the most urgent reports stand out ──
-function filterBrgyCases(btn, severity) {
-    const box = btn.closest('#brgy-case-box');
-    if (!box) return;
-    box.querySelectorAll('.brgy-filter').forEach(f => f.classList.remove('active-filter'));
-    btn.classList.add('active-filter');
+function onBrgySearchInput(val) {
+    brgyFilterState.search = (val || '').trim().toLowerCase();
+    renderBrgyReportList();
+}
 
-    let firstVisible = null;
-    box.querySelectorAll('.brgy-tab').forEach(t => {
-        const match = severity === 'all' || t.dataset.severity === severity;
-        t.style.display = match ? '' : 'none';
-        if (match && !firstVisible) firstVisible = t;
+function onBrgyDateInput(val) {
+    brgyFilterState.date = val || '';
+    renderBrgyReportList();
+}
+
+// ── Build a single report card, matching the reference design's card layout ──
+function buildBrgyReportCard(c) {
+    const isAiScan   = !!c.is_ai_scan;
+    const isPending  = c.status === 'pending';
+    const isResolved = c.status === 'resolved';
+
+    const iconColor = isAiScan ? '#8b5cf6' : (isPending ? '#f97316' : (isResolved ? '#16a34a' : '#3b82f6'));
+    const iconSvg   = isAiScan
+        ? `<svg fill="none" viewBox="0 0 24 24" stroke="${iconColor}" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2M12 8v8m-4-4h8"/></svg>`
+        : isPending
+        ? `<svg fill="none" viewBox="0 0 24 24" stroke="${iconColor}" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`
+        : `<svg fill="none" viewBox="0 0 24 24" stroke="${iconColor}" stroke-width="2.6"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>`;
+
+    // Status badge — just the current status, not the full history (e.g. a resolved
+    // case shows only "Resolved", not "Verified" + "Resolved").
+    // AI-scanned cases skip the review-pipeline badges entirely since they never need review.
+    const badgeDefs = [];
+    if (isAiScan) {
+        badgeDefs.push({ text: 'AI Scanned', color: '#8b5cf6', bg: 'rgba(139,92,246,0.1)' });
+    } else {
+        if (isPending)       badgeDefs.push({ text: 'Waiting for Review', color: '#f97316', bg: 'rgba(249,115,22,0.1)' });
+        else if (isResolved) badgeDefs.push({ text: 'Resolved', color: '#16a34a', bg: 'rgba(22,163,74,0.1)' });
+        else                 badgeDefs.push({ text: 'Verified', color: '#3b82f6', bg: 'rgba(59,130,246,0.1)' });
+    }
+    const badgesHtml = badgeDefs.map(b => `<span style="background:${b.bg};color:${b.color};font-size:9px;font-weight:800;padding:3px 9px;border-radius:999px;white-space:nowrap;">${b.text}</span>`).join('');
+
+    // Infection rate — falls back to plants_affected / total_plants when the percentage wasn't recorded directly.
+    let infectionRate = null;
+    if (c.infection_percentage !== null && c.infection_percentage !== undefined && c.infection_percentage !== '') {
+        infectionRate = parseFloat(c.infection_percentage);
+    } else if (c.plants_affected && c.total_plants) {
+        infectionRate = (parseFloat(c.plants_affected) / parseFloat(c.total_plants)) * 100;
+    }
+    const rateText = (infectionRate !== null && !isNaN(infectionRate)) ? `${infectionRate.toFixed(1)}% infection rate` : 'No infection data';
+
+    // AI scans carry their result as a parsed label + confidence rather than a disease_id / infection rate.
+    const diseaseLine = isAiScan
+        ? `AI Detected: ${c.ai_label || 'Unclassified'}${c.ai_confidence ? ' &bull; ' + c.ai_confidence + ' confidence' : ''}`
+        : `Reported Disease: ${c.disease_name || 'Unidentified'} &bull; ${rateText}`;
+
+    const reportId = 'PH-' + (c.reference_id || c.case_id);
+
+    return `
+    <div class="brgy-report-card">
+        <div class="brgy-report-icon" style="background:${iconColor}18;border:1px solid ${iconColor}44;">${iconSvg}</div>
+        <div style="min-width:0;flex:1;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px;">
+                <div style="min-width:0;">
+                    <span style="color:#0f172a;font-size:0.86rem;font-weight:800;">${c.farmer_name || 'Unknown Reporter'}</span>
+                    <span style="color:#94a3b8;font-size:0.68rem;font-weight:700;margin-left:6px;">${reportId}</span>
+                </div>
+                <div style="display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0;">${badgesHtml}</div>
+            </div>
+            <p style="color:#64748b;font-size:0.76rem;margin:2px 0;">${diseaseLine}</p>
+            <p style="color:#64748b;font-size:0.76rem;margin:2px 0;">Barangay: ${currentBrgyName}</p>
+            <p style="color:#94a3b8;font-size:0.7rem;margin:2px 0 8px;">Logged${c.report_date ? ' &bull; ' + c.report_date : ''}</p>
+            <a href="reports.php?case_id=${c.case_id}&ref=${c.reference_id}"
+               style="color:#2563eb;font-size:0.74rem;font-weight:800;text-decoration:none;"
+               onclick="event.stopPropagation();">
+                View Full Report
+            </a>
+        </div>
+    </div>`;
+}
+
+// ── Filter currentBrgyCases against the active status / search / date state and repaint the list ──
+function renderBrgyReportList() {
+    const list = document.getElementById('brgy-report-list');
+    if (!list) return;
+
+    const { status, search, date } = brgyFilterState;
+
+    const filtered = currentBrgyCases.filter(c => {
+        if (status === 'ai_scan') {
+            if (!c.is_ai_scan) return false;
+        } else {
+            if (c.is_ai_scan) return false;
+            if (status !== 'all' && c.status !== status) return false;
+        }
+
+        if (search) {
+            const haystack = [c.farmer_name, c.reference_id, c.case_id, c.disease_name, c.ai_label]
+                .filter(Boolean).join(' ').toLowerCase();
+            if (!haystack.includes(search)) return false;
+        }
+
+        if (date) {
+            const parsed = c.report_date ? new Date(c.report_date) : null;
+            if (parsed && !isNaN(parsed.getTime())) {
+                const iso = parsed.toISOString().slice(0, 10);
+                if (iso !== date) return false;
+            }
+        }
+
+        return true;
     });
 
-    if (firstVisible) {
-        showBrgyCaseTab(firstVisible, parseInt(firstVisible.dataset.idx, 10));
-    } else {
-        box.querySelectorAll('.brgy-case-panel').forEach(p => p.classList.remove('active-panel'));
-        const panelsWrap = box.querySelector('#brgy-case-panels');
-        if (panelsWrap && !panelsWrap.querySelector('.brgy-no-match')) {
-            const emptyMsg = document.createElement('p');
-            emptyMsg.className = 'brgy-no-match';
-            emptyMsg.style.cssText = 'color:#94a3b8;font-size:0.85rem;padding:20px 0;text-align:center;';
-            emptyMsg.textContent = 'No reports match this filter.';
-            panelsWrap.appendChild(emptyMsg);
-        }
+    if (filtered.length === 0) {
+        list.innerHTML = `<p class="brgy-no-match">${currentBrgyCases.length === 0 ? 'No reports here yet.' : 'No reports match this filter.'}</p>`;
+        return;
     }
+
+    list.innerHTML = filtered.map(buildBrgyReportCard).join('');
 }
 document.getElementById('brgy-popup-overlay').addEventListener('click', function(e) {
     if (e.target === this) closePopup();
