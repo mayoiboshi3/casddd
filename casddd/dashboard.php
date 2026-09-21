@@ -250,7 +250,9 @@ main { display: flex; width: 100%; height: 100vh; }
     backdrop-filter: blur(5px);
 }
 
-/* ── POPUP — white card, black & white theme, flex column so inner area scrolls ── */
+/* ── POPUP — white card, black & white theme. FIXED size: it never grows or shrinks with the
+      number of cases. Only the report list scrolls; header/tabs/search stay on top and the
+      footer buttons (View All Reports / Close) stay pinned to the bottom. ── */
 #brgy-popup {
     position: fixed;
     top: 50%;
@@ -260,12 +262,13 @@ main { display: flex; width: 100%; height: 100vh; }
     border: 1px solid #e2e8f0;
     border-radius: 22px;
     padding: 30px 32px 26px;
+    box-sizing: border-box;
     width: min(600px, 92vw);
-    max-height: 90vh;
+    height: min(800px, 90vh);
+    height: min(800px, 90dvh);
     display: flex;
     flex-direction: column;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
     z-index: 9999;
     box-shadow: 0 30px 70px rgba(0,0,0,0.4);
     animation: popIn .2s ease;
@@ -373,8 +376,18 @@ main { display: flex; width: 100%; height: 100vh; }
     display: flex;
     flex-direction: column;
     gap: 10px;
+    flex: 1 1 0;          /* takes all the space between the search row and the footer */
+    min-height: 0;        /* lets it shrink so it scrolls instead of stretching the popup */
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;   /* keeps the scrollbar off the cards */
 }
+/* Everything except the list keeps its natural height (header, tabs, search, footer). */
+#brgy-popup > *:not(.brgy-report-list) { flex-shrink: 0; }
+/* Footer sits at the very bottom even when the list is short or empty. */
+#brgy-popup > .brgy-popup-footer { margin-top: 14px; }
 .brgy-report-card {
+    flex-shrink: 0;
     display: flex;
     gap: 10px;
     background: #ffffff;
@@ -394,6 +407,7 @@ main { display: flex; width: 100%; height: 100vh; }
 }
 .brgy-report-icon svg { width: 14px; height: 14px; }
 .brgy-no-match, .brgy-no-cases {
+    margin: auto;         /* centres the empty-state message inside the fixed-height list */
     color: #94a3b8;
     font-size: 0.82rem;
     padding: 20px 0;
@@ -895,7 +909,7 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
         if (data) {
             if (data.highlight === 'pending')  { statusLabel = 'PENDING';         statusColor = '#f97316'; }
             if (data.highlight === 'verified') { statusLabel = 'CONFIRMED CASES'; statusColor = '#3b82f6'; }
-            if (data.highlight === 'none' && data.ai_scan_count > 0) { statusLabel = 'AI SCANS ONLY — NO REVIEW NEEDED'; statusColor = '#8b5cf6'; }
+            if (data.highlight === 'none' && data.ai_scan_count > 0) { statusLabel = 'AI SCAN'; statusColor = '#8b5cf6'; }
         }
         const statusPill = `<span style="display:inline-flex;align-items:center;gap:5px;background:${statusColor}17;color:${statusColor};font-size:9px;font-weight:900;padding:3px 10px;border-radius:999px;letter-spacing:0.1em;white-space:nowrap;">
             <span style="width:6px;height:6px;border-radius:999px;background:${statusColor};flex-shrink:0;"></span>${statusLabel}
@@ -969,8 +983,8 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
             <!-- Scrollable list of report cards -->
             <div id="brgy-report-list" class="brgy-report-list"></div>
 
-            <!-- Footer buttons -->
-            <div style="display:flex;gap:10px;margin-top:14px;flex-shrink:0;">
+            <!-- Footer buttons (pinned to the bottom of the fixed-size popup) -->
+            <div class="brgy-popup-footer" style="display:flex;gap:10px;margin-top:14px;flex-shrink:0;">
                 ${data && data.total_all > 0 ? `
                 <a href="reports.php?barangay_id=${match.id}"
                    style="flex:1;display:flex;align-items:center;justify-content:center;gap:8px;background:#0f172a;color:#fff;font-size:0.76rem;font-weight:800;padding:12px;border-radius:12px;text-decoration:none;letter-spacing:0.04em;"
