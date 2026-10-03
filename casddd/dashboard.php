@@ -3,7 +3,7 @@ $pageTitle = "Dashboard / Map";
 include "includes/layout.php";
 
 // ── DATABASE CONNECTION ──
-$conn = new mysqli('srv2090.hstgr.io', 'u250976479_Corn_Admin', 'CornCasd_26', 'u25097649_concasd_db');
+$conn = new mysqli('localhost', 'u250976479_Corn_Admin', 'CornCasd_26', 'u250976479_concasd_db');
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
