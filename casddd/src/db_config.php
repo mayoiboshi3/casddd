@@ -1,8 +1,8 @@
 <?php
-$servername = "localhost";
-$username = "root";
-$password = "882372";
-$dbname = "corncasd_db"; // Based on your file list
+$servername = "srv2090.hstgr.io";
+$username = "u250976479_Corn_Admin";
+$password = "CornCasd_26";
+$dbname = "u25097649_concasd_db"; // Based on your file list
 
 // Ensure the variable name is $conn
 $conn = mysqli_connect($servername, $username, $password, $dbname);

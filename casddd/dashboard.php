@@ -3,10 +3,11 @@ $pageTitle = "Dashboard / Map";
 include "includes/layout.php";
 
 // ── DATABASE CONNECTION ──
-$conn = new mysqli('localhost', 'root', '882372', 'corncasd_db');
+$conn = new mysqli('srv2090.hstgr.io', 'u250976479_Corn_Admin', 'CornCasd_26', 'u25097649_concasd_db');
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
+
 $conn->set_charset('utf8mb4'); // so names like "Bañadero" come through intact
 
 // ── STAT: Total Farmers ──
@@ -760,8 +761,6 @@ let currentBrgyName  = '';
 let brgyFilterState  = { status: 'all', search: '', date: '' };
 
 function normalizeName(str) {
-    // Strip accents so "Bañadero" (DB) matches the SVG path id "BANADERO".
-    // Also repairs the common mojibake form of ñ/Ñ ("Ã±" / "Ã‘") just in case.
     return String(str)
         .replace(/Ã±/g, 'n').replace(/Ã‘/g, 'N')
         .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
