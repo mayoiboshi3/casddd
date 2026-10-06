@@ -3,7 +3,7 @@ $pageTitle = "Dashboard / Map";
 include "includes/layout.php";
 
 // ── DATABASE CONNECTION ──
-$conn = new mysqli('localhost', 'root', '882372', 'corncasd_db');
+$conn = new mysqli('localhost', 'root', '', 'corncasd_db');
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
