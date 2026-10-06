@@ -759,11 +759,6 @@ let currentBrgyCases = [];
 let currentBrgyName  = '';
 let brgyFilterState  = { status: 'all', search: '', date: '' };
 
-// ── Shared state for the currently-open barangay popup's report list ──
-let currentBrgyCases = [];
-let currentBrgyName  = '';
-let brgyFilterState  = { status: 'all', search: '', date: '' };
-
 function normalizeName(str) {
     // Strip accents so "Bañadero" (DB) matches the SVG path id "BANADERO".
     // Also repairs the common mojibake form of ñ/Ñ ("Ã±" / "Ã‘") just in case.
