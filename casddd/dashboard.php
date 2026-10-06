@@ -18,17 +18,17 @@ if ($f) { $totalFarmers = $f->fetch_assoc()['cnt']; }
 // ── STAT: Active Reports (pending + verified) — manual reports only; AI scans
 // don't need review, so they're excluded here and counted separately below. ──
 $totalActiveReports = 0;
-$r = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
+$r = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
 if ($r) { $totalActiveReports = $r->fetch_assoc()['cnt']; }
 
 // ── STAT: Verified Cases (manual reports only) ──
 $totalVerifiedCases = 0;
-$v = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
+$v = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
 if ($v) { $totalVerifiedCases = $v->fetch_assoc()['cnt']; }
 
 // ── STAT: AI Scans — auto-classified cases that don't require review ──
 $totalAiScans = 0;
-$as = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
+$as = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
 if ($as) { $totalAiScans = $as->fetch_assoc()['cnt']; }
 
 // ── BUILD BARANGAY DATA ──
@@ -62,7 +62,25 @@ if ($brgy_res) {
         $ai_scan_count  = 0;
         $cases = [];
         if ($cases_res) {
-            while ($c = $cases_res->fetch_assoc()) {
+            // A report with 2-3 diseases selected is several rows sharing one reference_id — fold them
+            // into ONE report (diseases joined with " + ") so the counts and the popup list match the
+            // Reports page instead of counting each disease separately.
+            $grouped = [];
+            while ($row_c = $cases_res->fetch_assoc()) {
+                $gkey = trim((string)($row_c['reference_id'] ?? '')) !== '' ? $row_c['reference_id'] : 'c' . $row_c['case_id'];
+                if (!isset($grouped[$gkey])) {
+                    $grouped[$gkey] = ['row' => $row_c, 'diseases' => []];
+                } elseif ((int)$row_c['case_id'] < (int)$grouped[$gkey]['row']['case_id']) {
+                    $grouped[$gkey]['row'] = $row_c;   // lowest case_id = the representative row
+                }
+                $dn = trim((string)($row_c['disease_name'] ?? ''));
+                if ($dn !== '' && !in_array($dn, $grouped[$gkey]['diseases'], true)) {
+                    $grouped[$gkey]['diseases'][] = $dn;
+                }
+            }
+            foreach ($grouped as $g) {
+                $c = $g['row'];
+                if (!empty($g['diseases'])) $c['disease_name'] = implode(' + ', $g['diseases']);
                 $isAiScan = ($c['source'] === 'scan');
 
                 if ($isAiScan) {
@@ -129,7 +147,7 @@ if ($brgy_res) {
 
 // ── STAT: Pending Cases (manual reports only — AI scans never need review) ──
 $totalPendingCases = 0;
-$pq = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
+$pq = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
 if ($pq) { $totalPendingCases = $pq->fetch_assoc()['cnt']; }
 
 $conn->close();
@@ -149,10 +167,11 @@ main { display: flex; width: 100%; height: 100vh; }
     cursor: pointer;
     stroke: rgba(255,255,255,0.15);
     stroke-width: 0.4px;
-    transition: transform 0.25s cubic-bezier(0.2,0.8,0.2,1),
-                filter   0.25s cubic-bezier(0.2,0.8,0.2,1),
-                stroke   0.25s ease,
-                stroke-width 0.25s ease;
+    transition: transform 0.18s cubic-bezier(0.2,0.8,0.2,1),
+                opacity   0.15s ease,
+                fill      0.15s ease,
+                stroke    0.15s ease,
+                stroke-width 0.15s ease;
     transform-box: fill-box;
     transform-origin: center;
 }
@@ -497,42 +516,41 @@ main { display: flex; width: 100%; height: 100vh; }
 /* ── MAP FILTER STATES ── */
 #map-3d-wrap svg path.map-dimmed {
     opacity: 0.18;
-    filter: grayscale(1) brightness(0.5) !important;
+    filter: none !important;
     animation: none !important;
 }
 #map-3d-wrap svg path.map-highlighted-active {
     fill: #16a34a !important;
     filter: drop-shadow(0 0 8px rgba(22,163,74,1))
-            drop-shadow(0 0 20px rgba(22,163,74,0.85))
-            drop-shadow(0 0 40px rgba(22,163,74,0.5)) !important;
+            drop-shadow(0 0 20px rgba(22,163,74,0.9)) !important;
     stroke: #86efac !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
     animation: none !important;
 }
 #map-3d-wrap svg path.map-highlighted-pending {
+    animation: none !important;
     fill: #f97316 !important;
     filter: drop-shadow(0 0 8px rgba(249,115,22,1))
-            drop-shadow(0 0 20px rgba(249,115,22,0.85))
-            drop-shadow(0 0 40px rgba(249,115,22,0.5)) !important;
+            drop-shadow(0 0 20px rgba(249,115,22,0.9)) !important;
     stroke: #fdba74 !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
 #map-3d-wrap svg path.map-highlighted-verified {
+    animation: none !important;
     fill: #3b82f6 !important;
     filter: drop-shadow(0 0 8px rgba(59,130,246,1))
-            drop-shadow(0 0 20px rgba(59,130,246,0.85))
-            drop-shadow(0 0 40px rgba(59,130,246,0.5)) !important;
+            drop-shadow(0 0 20px rgba(59,130,246,0.9)) !important;
     stroke: #93c5fd !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
 #map-3d-wrap svg path.map-highlighted-affected {
+    animation: none !important;
     fill: #ff6600 !important;
     filter: drop-shadow(0 0 8px rgba(255,102,0,1))
-            drop-shadow(0 0 20px rgba(255,102,0,0.85))
-            drop-shadow(0 0 40px rgba(255,102,0,0.5)) !important;
+            drop-shadow(0 0 20px rgba(255,102,0,0.9)) !important;
     stroke: #ffaa44 !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
@@ -540,8 +558,7 @@ main { display: flex; width: 100%; height: 100vh; }
 #map-3d-wrap svg path.map-highlighted-scan {
     fill: #8b5cf6 !important;
     filter: drop-shadow(0 0 8px rgba(139,92,246,1))
-            drop-shadow(0 0 20px rgba(139,92,246,0.85))
-            drop-shadow(0 0 40px rgba(139,92,246,0.5)) !important;
+            drop-shadow(0 0 20px rgba(139,92,246,0.9)) !important;
     stroke: #c4b5fd !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
@@ -782,46 +799,47 @@ function findBarangayByPathId(pathId) {
 }
 
 // ── APPLY HIGHLIGHT CLASSES ON LOAD ──
-document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
+// Build the path → barangay lookup ONCE (normalizing names for every path on every
+// filter click was the main source of lag).
+const mapPathInfo = Array.from(document.querySelectorAll('#map-3d-wrap svg path')).map(path => {
     const match = findBarangayByPathId(path.id);
-    if (match && match.data.highlight !== 'none') {
-        path.classList.add('status-' + match.data.highlight);
+    return { path, data: match ? match.data : null };
+});
+mapPathInfo.forEach(({ path, data }) => {
+    if (data && data.highlight !== 'none') {
+        path.classList.add('status-' + data.highlight);
     }
 });
 
 // ── CARD FILTER ──
 let activeFilter = null;
+let filterFrame  = null;
+
+const MAP_FILTER_CLASSES = ['map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected','map-highlighted-scan'];
+const MAP_FILTER_RULES = {
+    active:   { cls: 'map-highlighted-active',   test: d => d.total_active   > 0 },
+    pending:  { cls: 'map-highlighted-pending',  test: d => d.pending_count  > 0 },
+    verified: { cls: 'map-highlighted-verified', test: d => d.verified_count > 0 },
+    affected: { cls: 'map-highlighted-affected', test: d => d.total_active   > 0 },
+    ai_scan:  { cls: 'map-highlighted-scan',     test: d => d.ai_scan_count  > 0 }
+};
 
 function applyMapFilter(filterType) {
-    const allPaths = document.querySelectorAll('#map-3d-wrap svg path');
-    if (!filterType) {
-        allPaths.forEach(path => {
-            path.classList.remove('map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected');
+    // Compute the target class for every path first, then write them all in one frame.
+    const rule = filterType ? MAP_FILTER_RULES[filterType] : null;
+    const targets = mapPathInfo.map(({ data }) => {
+        if (!rule) return null;
+        return (data && rule.test(data)) ? rule.cls : 'map-dimmed';
+    });
+    if (filterFrame) cancelAnimationFrame(filterFrame);
+    filterFrame = requestAnimationFrame(() => {
+        filterFrame = null;
+        mapPathInfo.forEach(({ path }, i) => {
+            const cl = path.classList;
+            const target = targets[i];
+            MAP_FILTER_CLASSES.forEach(c => { if (c !== target && cl.contains(c)) cl.remove(c); });
+            if (target && !cl.contains(target)) cl.add(target);
         });
-        return;
-    }
-    allPaths.forEach(path => {
-        const match = findBarangayByPathId(path.id);
-        const data  = match ? match.data : null;
-        path.classList.remove('map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected','map-highlighted-scan');
-
-        let qualifies = false;
-        if (filterType === 'active'   && data && data.total_active   > 0) qualifies = true;
-        if (filterType === 'pending'  && data && data.pending_count  > 0) qualifies = true;
-        if (filterType === 'verified' && data && data.verified_count > 0) qualifies = true;
-        if (filterType === 'affected' && data && data.total_active   > 0) qualifies = true;
-        if (filterType === 'ai_scan'  && data && data.ai_scan_count  > 0) qualifies = true;
-
-        if (qualifies) {
-            const cls = filterType === 'active'   ? 'map-highlighted-active'
-                      : filterType === 'pending'  ? 'map-highlighted-pending'
-                      : filterType === 'verified' ? 'map-highlighted-verified'
-                      : filterType === 'ai_scan'  ? 'map-highlighted-scan'
-                      :                             'map-highlighted-affected';
-            path.classList.add(cls);
-        } else {
-            path.classList.add('map-dimmed');
-        }
     });
 }
 

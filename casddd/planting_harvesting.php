@@ -518,6 +518,9 @@ function render_planting_harvesting_section($conn) {
         <div class="pt-3 pb-1 flex items-center gap-2 flex-wrap" id="phFilterChips"></div>
 
         <div id="phAllReportsBody" class="divide-y divide-gray-100 mt-2"></div>
+
+        <!-- Page controls (10 reports per page) — built by renderPHRows(). -->
+        <div id="phPager" class="ph-pager hidden"></div>
     </div>
     </div>
 
@@ -833,6 +836,16 @@ function render_planting_harvesting_section($conn) {
             font-size: 13px;
             flex-shrink: 0;
         }
+        /* Pagination (10 reports per page) */
+        .ph-pager { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; padding:16px 24px; border-top:1px solid #f3f4f6; }
+        .ph-pager.hidden { display:none; }
+        .ph-pager-info { font-size:11px; font-weight:700; color:#9ca3af; text-transform:uppercase; letter-spacing:.05em; }
+        .ph-pager-btns { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+        .ph-pager-btn { min-width:34px; height:34px; padding:0 10px; border:1px solid #e5e7eb; background:#fff; color:#4b5563; border-radius:10px; font-size:11px; font-weight:800; cursor:pointer; transition:background .15s ease,color .15s ease,border-color .15s ease; }
+        .ph-pager-btn:hover:not(:disabled):not(.active) { background:#f3f4f6; color:#111827; }
+        .ph-pager-btn.active { background:#111827; border-color:#111827; color:#fff; cursor:default; }
+        .ph-pager-btn:disabled { opacity:.4; cursor:not-allowed; }
+        .ph-pager-dots { padding:0 4px; color:#9ca3af; font-weight:800; }
         .ph-empty {
             text-align: center;
             padding: 56px 24px;
@@ -1250,7 +1263,13 @@ function render_planting_harvesting_section($conn) {
         renderPHRows();
     }
 
-    function renderPHRows() {
+    const PH_PAGE_SIZE = 10;
+    let phPage = 1;
+
+    // keepPage = true after a review action (verify / reject / delete) so the list stays where it was;
+    // every other call (search, tab, chip, date) starts again from page 1.
+    function renderPHRows(keepPage) {
+        if (keepPage !== true) phPage = 1;
         const body = document.getElementById('phAllReportsBody');
         const searchTerm = (document.getElementById('phSearchInput')?.value || '').trim().toLowerCase();
         const dateFilter = document.getElementById('phDateInput')?.value || '';
@@ -1285,7 +1304,14 @@ function render_planting_harvesting_section($conn) {
 
         body.innerHTML = '';
 
+        const phPager = document.getElementById('phPager');
+        const phTotal = rows.length;
+        const phPages = Math.max(1, Math.ceil(phTotal / PH_PAGE_SIZE));
+        phPage = Math.min(Math.max(1, phPage), phPages);
+        const phStart = (phPage - 1) * PH_PAGE_SIZE;
+
         if (!rows.length) {
+            if (phPager) { phPager.classList.add('hidden'); phPager.innerHTML = ''; }
             const emptyMsg = (phCurrentTypeTab === 'rejected' && !searchTerm && !dateFilter)
                 ? 'No rejected reports'
                 : 'No reports match these filters';
@@ -1293,7 +1319,7 @@ function render_planting_harvesting_section($conn) {
             return;
         }
 
-        rows.forEach((rep) => {
+        rows.slice(phStart, phStart + PH_PAGE_SIZE).forEach((rep) => {
             const isFieldReport = rep.report_type === 'growth' || rep.report_type === 'damage';
             const cropLabel = PH_CROP_LABEL[rep.crop_type] || rep.crop_type || '';
             const badgeClass = PH_STATUS_BADGE[rep.status] || PH_STATUS_BADGE.pending;
@@ -1341,7 +1367,54 @@ function render_planting_harvesting_section($conn) {
             };
             body.appendChild(row);
         });
+
+        // Fixed list height: always 10 rows tall (measured from the real rows, kept at the tallest
+        // seen) so the box doesn't shrink on short pages / small result sets.
+        let rowH = 0;
+        body.querySelectorAll('.ph-row').forEach(r => { rowH = Math.max(rowH, r.getBoundingClientRect().height + 1); });
+        const prevH = parseFloat(body.dataset.rowH || '0');
+        if (rowH > prevH) { body.dataset.rowH = String(rowH); }
+        const useH = Math.max(rowH, prevH);
+        if (useH > 0) body.style.minHeight = Math.ceil(useH * PH_PAGE_SIZE) + 'px';
+
+        phRenderPager(phTotal, phPages);
     }
+
+    function phRenderPager(total, pages) {
+        const pager = document.getElementById('phPager');
+        if (!pager) return;
+        if (total <= PH_PAGE_SIZE) { pager.classList.add('hidden'); pager.innerHTML = ''; return; }
+        pager.classList.remove('hidden');
+        const start = (phPage - 1) * PH_PAGE_SIZE;
+        const nums = [];
+        let last = 0;
+        for (let n = 1; n <= pages; n++) {
+            if (n === 1 || n === pages || Math.abs(n - phPage) <= 1) {
+                if (last && n - last > 1) nums.push('…');
+                nums.push(n);
+                last = n;
+            }
+        }
+        let html = '<div class="ph-pager-info">Showing ' + (start + 1) + '–' + Math.min(start + PH_PAGE_SIZE, total) + ' of ' + total + ' reports</div>'
+                 + '<div class="ph-pager-btns">'
+                 + '<button type="button" class="ph-pager-btn" data-page="' + (phPage - 1) + '"' + (phPage === 1 ? ' disabled' : '') + '>Prev</button>';
+        nums.forEach(p => {
+            html += (p === '…')
+                ? '<span class="ph-pager-dots">…</span>'
+                : '<button type="button" class="ph-pager-btn' + (p === phPage ? ' active' : '') + '" data-page="' + p + '">' + p + '</button>';
+        });
+        html += '<button type="button" class="ph-pager-btn" data-page="' + (phPage + 1) + '"' + (phPage === pages ? ' disabled' : '') + '>Next</button></div>';
+        pager.innerHTML = html;
+    }
+
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('#phPager .ph-pager-btn');
+        if (!btn || btn.disabled || btn.classList.contains('active')) return;
+        phPage = parseInt(btn.dataset.page, 10) || 1;
+        renderPHRows(true);
+        const top = document.getElementById('phTypeTabsWrap');
+        if (top) top.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
 
     // Builds and renders the farm activity list right away — no button click
     // needed to see it, it's live on the page as soon as it loads.
@@ -1593,7 +1666,7 @@ function render_planting_harvesting_section($conn) {
         if (idx !== -1) phAllReports.splice(idx, 1);
         buildPHTypeTabs();
         buildPHFilterChips();
-        renderPHRows();
+        renderPHRows(true);
     }
 
     // Success / error message — the same toast the disease reports use (defined in review.php),
@@ -1610,7 +1683,7 @@ function render_planting_harvesting_section($conn) {
         if (idx !== -1) { phAllReports[idx] = report; } else { phAllReports.unshift(report); }
         buildPHTypeTabs();
         buildPHFilterChips();
-        renderPHRows();
+        renderPHRows(true);
     }
 
     // ── Reject flow: clicking Reject first reveals a REQUIRED reason box; the second click
@@ -1642,7 +1715,7 @@ function render_planting_harvesting_section($conn) {
             phAllReports[idx].remarks = remarks;
         }
         buildPHFilterChips();
-        renderPHRows();
+        renderPHRows(true);
     }
 
     document.addEventListener('DOMContentLoaded', () => {

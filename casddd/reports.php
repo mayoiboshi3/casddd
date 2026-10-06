@@ -580,11 +580,15 @@ function buildCaseMessages($conn, $row) {
 }
 
 // 3. STATS CALCULATION
-$stats_query = mysqli_query($conn, "SELECT COUNT(*) as total, 
-    COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending, 
-    COUNT(CASE WHEN status = 'verified' THEN 1 END) as verified, 
-    COUNT(CASE WHEN status = 'resolved' THEN 1 END) as resolved, 
-    COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected FROM disease_cases WHERE $manualOnlySql");
+// Counts REPORTS, not database rows: a report with 2-3 diseases selected is several disease_cases rows
+// sharing one reference_id, and the list below shows it as ONE file — so the tab numbers count distinct
+// reference_ids (same key the list groups by) or they would be higher than the rows you can see.
+$refKeySql = "COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))";
+$stats_query = mysqli_query($conn, "SELECT COUNT(DISTINCT $refKeySql) as total,
+    COUNT(DISTINCT CASE WHEN status = 'pending'  THEN $refKeySql END) as pending,
+    COUNT(DISTINCT CASE WHEN status = 'verified' THEN $refKeySql END) as verified,
+    COUNT(DISTINCT CASE WHEN status = 'resolved' THEN $refKeySql END) as resolved,
+    COUNT(DISTINCT CASE WHEN status = 'rejected' THEN $refKeySql END) as rejected FROM disease_cases WHERE $manualOnlySql");
 $stats     = mysqli_fetch_assoc($stats_query);
 
 // AI scans are counted on their own and never mixed into the report numbers above.
@@ -872,6 +876,17 @@ $tableRows = [];
         color: #9ca3af;
     }
 
+    /* ── Pagination for the Disease Reports list (10 reports per page) ── */
+    .dr-pager { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; padding:16px 24px; border-top:1px solid #f3f4f6; }
+    .dr-pager.hidden { display:none; }
+    .dr-pager-info { font-size:11px; font-weight:700; color:#9ca3af; text-transform:uppercase; letter-spacing:.05em; }
+    .dr-pager-btns { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+    .dr-pager-btn { min-width:34px; height:34px; padding:0 10px; border:1px solid #e5e7eb; background:#fff; color:#4b5563; border-radius:10px; font-size:11px; font-weight:800; cursor:pointer; transition:background .15s ease,color .15s ease,border-color .15s ease; }
+    .dr-pager-btn:hover:not(:disabled):not(.active) { background:#f3f4f6; color:#111827; }
+    .dr-pager-btn.active { background:#111827; border-color:#111827; color:#fff; cursor:default; }
+    .dr-pager-btn:disabled { opacity:.4; cursor:not-allowed; }
+    .dr-pager-dots { padding:0 4px; color:#9ca3af; font-weight:800; }
+
     /* ── Smooth hover feedback for filter inputs and action buttons ── */
     .filter-input {
         transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
@@ -935,6 +950,80 @@ $tableRows = [];
        and the reportPopIn animation they use) now lives in review.php,
        rendered by render_review_modal(). */
 </style>
+
+<script>
+/* ── Shared pagination helper (10 per page) — used by Disease Reports and AI Scans.
+   Works on rows already in the DOM, so search keeps covering every page, and the list box keeps a
+   fixed height (10 rows tall) so it never shrinks on short pages. Reusable for any other list:
+   casePaginate({ panel, rowSel, inputSel, emptySel, pagerSel, listSel, page, scroll }) ── */
+window.CASE_PAGE_SIZE = 10;
+window.casePaginate = function (cfg) {
+    var size  = window.CASE_PAGE_SIZE;
+    var panel = cfg.panel;
+    if (!panel) return;
+    var input = cfg.inputSel ? panel.querySelector(cfg.inputSel) : null;
+    var term  = ((input && input.value) || '').trim().toLowerCase();
+    var list  = cfg.listSel ? panel.querySelector(cfg.listSel) : null;
+    var rows  = panel.querySelectorAll(cfg.rowSel);
+
+    var matched = [];
+    rows.forEach(function (row) {
+        var ok = !term || (row.dataset.search || '').indexOf(term) !== -1;
+        if (ok) matched.push(row); else row.style.display = 'none';
+    });
+
+    var total = matched.length;
+    var pages = Math.max(1, Math.ceil(total / size));
+    var page  = Math.min(Math.max(1, cfg.page || 1), pages);
+    var start = (page - 1) * size, end = start + size;
+    matched.forEach(function (row, i) {
+        row.style.display = (i >= start && i < end) ? '' : 'none';
+    });
+
+    // Fixed list height: 10 rows' worth, measured from the real rows (kept at the tallest seen).
+    if (list) {
+        var h = 0;
+        matched.slice(start, end).forEach(function (row) {
+            h = Math.max(h, row.getBoundingClientRect().height + 1);
+        });
+        var prev = parseFloat(list.dataset.rowH || '0');
+        if (h > prev) { list.dataset.rowH = String(h); prev = h; }
+        if (prev > 0) list.style.minHeight = Math.ceil(prev * size) + 'px';
+    }
+
+    var emptyEl = cfg.emptySel ? panel.querySelector(cfg.emptySel) : null;
+    if (emptyEl) emptyEl.classList.toggle('hidden', !(term && total === 0));
+
+    var pager = panel.querySelector(cfg.pagerSel);
+    if (!pager) return page;
+    if (total <= size) { pager.classList.add('hidden'); pager.innerHTML = ''; return page; }
+    pager.classList.remove('hidden');
+
+    var nums = [], last = 0;
+    for (var n = 1; n <= pages; n++) {
+        if (n === 1 || n === pages || Math.abs(n - page) <= 1) {
+            if (last && n - last > 1) nums.push('…');
+            nums.push(n); last = n;
+        }
+    }
+    var html = '<div class="dr-pager-info">Showing ' + (start + 1) + '–' + Math.min(end, total) + ' of ' + total + ' ' + (cfg.noun || 'reports') + '</div>'
+             + '<div class="dr-pager-btns">'
+             + '<button type="button" class="dr-pager-btn" data-page="' + (page - 1) + '"' + (page === 1 ? ' disabled' : '') + '>Prev</button>';
+    nums.forEach(function (p) {
+        html += (p === '…')
+            ? '<span class="dr-pager-dots">…</span>'
+            : '<button type="button" class="dr-pager-btn' + (p === page ? ' active' : '') + '" data-page="' + p + '">' + p + '</button>';
+    });
+    html += '<button type="button" class="dr-pager-btn" data-page="' + (page + 1) + '"' + (page === pages ? ' disabled' : '') + '>Next</button></div>';
+    pager.innerHTML = html;
+
+    if (cfg.scroll && cfg.scrollSel) {
+        var t = panel.querySelector(cfg.scrollSel);
+        if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    return page;
+};
+</script>
 <?php casd_dialog_assets(); ?>
 
 <!-- ═══ REPORT TYPE SWITCHER ═══
@@ -1126,7 +1215,7 @@ $tableRows = [];
         'events' => $calEvents, 'selected' => $calSelected, 'from' => $calFrom, 'to' => $calTo,
     ], JSON_HEX_TAG) ?></script>
 
-    <div class="divide-y divide-gray-50 mt-2">
+    <div id="drList" class="divide-y divide-gray-50 mt-2">
         <?php
         $brgy_filter = $filterBarangayId ? "AND dc.barangay_id = $filterBarangayId" : "";
 
@@ -1170,7 +1259,8 @@ $tableRows = [];
         $groupOrder  = [];  // preserves first-seen order (already sorted by report_date desc)
         if ($result) {
             while ($row = mysqli_fetch_assoc($result)) {
-                $ref = $row['reference_id'];
+                // Same key as the tab counts above: a row with no reference_id stays its own report.
+                $ref = trim((string)($row['reference_id'] ?? '')) !== '' ? $row['reference_id'] : 'c' . $row['case_id'];
                 if (!isset($groups[$ref])) {
                     $groups[$ref] = ['primary' => $row, 'diseases' => [], 'case_ids' => []];
                     $groupOrder[] = $ref;
@@ -1315,6 +1405,9 @@ $tableRows = [];
          currently loaded rows (distinct from the "no reports" message
          above, which covers an empty tab). -->
     <div id="drSearchEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No reports match your search</p></div>
+
+    <!-- Page controls — built by filterDrRows() (client-side, 10 reports per page). -->
+    <div id="drPager" class="dr-pager hidden"></div>
 
     <!-- Carries this tab's rows to the client so the PDF export button (and
          the AJAX tab-switch script below) always has the right data, even
@@ -1482,7 +1575,7 @@ if ($scan_q) {
         </div>
     </div>
 
-    <div class="divide-y divide-gray-50 mt-4">
+    <div id="scanList" class="divide-y divide-gray-50 mt-4">
         <?php if (count($scanOrder) > 0):
             foreach ($scanOrder as $__sref):
                 $sg        = $scanGroups[$__sref];
@@ -1571,6 +1664,8 @@ if ($scan_q) {
 
     <div id="scanSearchEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No scans match your search</p></div>
 
+    <div id="scanPager" class="dr-pager hidden"></div>
+
     <?php if (count($scanOrder) >= $scanLimit): ?>
     <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest pt-4 text-center">Showing the latest <?= (int)$scanLimit ?> scans. Use the barangay and date filters to narrow down.</p>
     <?php endif; ?>
@@ -1652,20 +1747,21 @@ if ($scan_q) {
 
 <script>
 // Instant client-side search across the scans already loaded on this page.
-function filterScanRows() {
-    var panel = document.getElementById('scanPanel');
-    if (!panel) return;
-    var input = document.getElementById('scanSearchInput');
-    var term  = ((input && input.value) || '').trim().toLowerCase();
-    var visible = 0;
-    panel.querySelectorAll('.scan-row').forEach(function (row) {
-        var match = !term || (row.dataset.search || '').indexOf(term) !== -1;
-        row.style.display = match ? '' : 'none';
-        if (match) visible++;
+function renderScanPage(page, scrollToList) {
+    window.casePaginate({
+        panel: document.getElementById('scanPanel'), rowSel: '.scan-row', inputSel: '#scanSearchInput',
+        emptySel: '#scanSearchEmpty', pagerSel: '#scanPager', listSel: '#scanList',
+        page: page, scroll: scrollToList, scrollSel: '#scanList', noun: 'scans'
     });
-    var empty = document.getElementById('scanSearchEmpty');
-    if (empty) empty.classList.toggle('hidden', !(term && visible === 0));
 }
+// Typing in the search box goes back to page 1 of the matches.
+function filterScanRows() { renderScanPage(1, false); }
+document.addEventListener('click', function (e) {
+    var btn = e.target.closest('#scanPanel .dr-pager-btn');
+    if (!btn || btn.disabled || btn.classList.contains('active')) return;
+    renderScanPage(parseInt(btn.dataset.page, 10), true);
+});
+renderScanPage(1, false);
 
 // ── AI scan detail modal ──
 function openScanModal(d) {
@@ -1892,6 +1988,9 @@ window.addEventListener('DOMContentLoaded', function() {
         // The calendar lives inside the panel, so it was just replaced too — redraw it.
         if (window.drCalendarInit) { window.drCalendarInit(); }
 
+        // New tab/filter results start on page 1.
+        if (window.drRenderPage) { window.drRenderPage(1, false); }
+
         // Keep the PDF export button's data in sync with whichever tab is
         // now showing (each panel carries its own rows in a JSON island).
         var dataEl = newPanel.querySelector('#drTableRowsData');
@@ -1954,21 +2053,25 @@ window.addEventListener('DOMContentLoaded', function() {
     // current tab — same behavior as the Farm Reports search bar. Defined
     // globally (not re-bound per panel) since #drPanel gets replaced whole
     // on every tab switch; this just re-queries the DOM each time it runs.
-    window.filterDrRows = function () {
-        var panel = getPanel();
-        if (!panel) return;
-        var input = panel.querySelector('#drSearchInput');
-        var term = ((input && input.value) || '').trim().toLowerCase();
-        var rows = panel.querySelectorAll('.dr-row');
-        var visibleCount = 0;
-        rows.forEach(function (row) {
-            var matches = !term || (row.dataset.search || '').indexOf(term) !== -1;
-            row.style.display = matches ? '' : 'none';
-            if (matches) visibleCount++;
+    window.drRenderPage = function (page, scrollToList) {
+        window.casePaginate({
+            panel: getPanel(), rowSel: '.dr-row', inputSel: '#drSearchInput', emptySel: '#drSearchEmpty',
+            pagerSel: '#drPager', listSel: '#drList', page: page, scroll: scrollToList,
+            scrollSel: '.dr-tabs-wrap', noun: 'reports'
         });
-        var emptyEl = panel.querySelector('#drSearchEmpty');
-        if (emptyEl) emptyEl.classList.toggle('hidden', !(term && visibleCount === 0));
     };
+
+    // Typing in the search box goes back to page 1 of the matches.
+    window.filterDrRows = function () { window.drRenderPage(1, false); };
+
+    document.addEventListener('click', function (e) {
+        var btn = e.target.closest('#' + PANEL_ID + ' .dr-pager-btn');
+        if (!btn || btn.disabled || btn.classList.contains('active')) return;
+        window.drRenderPage(parseInt(btn.dataset.page, 10), true);
+    });
+
+    // First paint on page load (panel swaps call drRenderPage themselves in swapPanel).
+    window.drRenderPage(1, false);
 
     // Support the browser's Back/Forward buttons for tab/filter changes.
     window.addEventListener('popstate', function () {
