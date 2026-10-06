@@ -4,6 +4,10 @@
 // away and answer the browser's fetch() with pure JSON. Normal page loads are unaffected.
 ob_start();
 require_once __DIR__ . "/src/db_config.php"; 
+
+// Folder (relative to this page, or a full URL path) where the AI scan photos are shown from.
+// CHANGE THIS to move the scan photos, e.g. 'uploads/scan_results' or 'scans/images'.
+define('SCAN_PHOTO_DIR', 'corn_api/uploads/scan_results');
 $pageTitle = "Reports"; 
 include "includes/layout.php"; 
 
@@ -1493,9 +1497,10 @@ if ($scan_q) {
                 // Display bands only (same colors the modal uses): 80+ green, 60-79 amber, below 60 red.
                 $sConfClass = $sConfNum === null ? 'sev-low' : ($sConfNum >= 80 ? 'sev-low' : ($sConfNum >= 60 ? 'sev-moderate' : 'sev-high'));
                 $sIsTarget = $scanHighlightId && in_array($scanHighlightId, $sg['case_ids'], true);
-                // Scan photos are stored with their full path ("uploads/scan_results/..."); a bare file name lives in uploads/.
+                // Scan photos are looked up in SCAN_PHOTO_DIR (set at the top of this file). Only the file name
+                // from the database is used, so rows saved with an old path ("uploads/scan_results/...") still work.
                 $sPhoto    = trim((string)($srow['photo_evidence'] ?? ''));
-                $sPhotoSrc = $sPhoto === '' ? '' : (strpos($sPhoto, '/') !== false ? $sPhoto : 'uploads/' . $sPhoto);
+                $sPhotoSrc = $sPhoto === '' ? '' : rtrim(SCAN_PHOTO_DIR, '/') . '/' . rawurlencode(basename(str_replace('\\', '/', $sPhoto)));
                 $sInitial  = preg_match('/\p{L}/u', $sFarmer, $__im) ? htmlspecialchars(strtoupper($__im[0])) : '?';
                 $sTs       = strtotime($srow['report_date']);
                 $scanModal = [
