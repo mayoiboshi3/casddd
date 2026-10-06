@@ -2,7 +2,7 @@
 $servername = "localhost";
 $username = "root";
 $password = "";
-$dbname = "corncasd_db"; // Based on your file list
+$dbname = "db2"; // Based on your file list
 
 // Ensure the variable name is $conn
 $conn = mysqli_connect($servername, $username, $password, $dbname);
