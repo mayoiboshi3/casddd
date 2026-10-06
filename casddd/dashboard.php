@@ -18,17 +18,17 @@ if ($f) { $totalFarmers = $f->fetch_assoc()['cnt']; }
 // ── STAT: Active Reports (pending + verified) — manual reports only; AI scans
 // don't need review, so they're excluded here and counted separately below. ──
 $totalActiveReports = 0;
-$r = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
+$r = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
 if ($r) { $totalActiveReports = $r->fetch_assoc()['cnt']; }
 
 // ── STAT: Verified Cases (manual reports only) ──
 $totalVerifiedCases = 0;
-$v = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
+$v = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
 if ($v) { $totalVerifiedCases = $v->fetch_assoc()['cnt']; }
 
 // ── STAT: AI Scans — auto-classified cases that don't require review ──
 $totalAiScans = 0;
-$as = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
+$as = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
 if ($as) { $totalAiScans = $as->fetch_assoc()['cnt']; }
 
 // ── BUILD BARANGAY DATA ──
@@ -62,7 +62,25 @@ if ($brgy_res) {
         $ai_scan_count  = 0;
         $cases = [];
         if ($cases_res) {
-            while ($c = $cases_res->fetch_assoc()) {
+            // A report with 2-3 diseases selected is several rows sharing one reference_id — fold them
+            // into ONE report (diseases joined with " + ") so the counts and the popup list match the
+            // Reports page instead of counting each disease separately.
+            $grouped = [];
+            while ($row_c = $cases_res->fetch_assoc()) {
+                $gkey = trim((string)($row_c['reference_id'] ?? '')) !== '' ? $row_c['reference_id'] : 'c' . $row_c['case_id'];
+                if (!isset($grouped[$gkey])) {
+                    $grouped[$gkey] = ['row' => $row_c, 'diseases' => []];
+                } elseif ((int)$row_c['case_id'] < (int)$grouped[$gkey]['row']['case_id']) {
+                    $grouped[$gkey]['row'] = $row_c;   // lowest case_id = the representative row
+                }
+                $dn = trim((string)($row_c['disease_name'] ?? ''));
+                if ($dn !== '' && !in_array($dn, $grouped[$gkey]['diseases'], true)) {
+                    $grouped[$gkey]['diseases'][] = $dn;
+                }
+            }
+            foreach ($grouped as $g) {
+                $c = $g['row'];
+                if (!empty($g['diseases'])) $c['disease_name'] = implode(' + ', $g['diseases']);
                 $isAiScan = ($c['source'] === 'scan');
 
                 if ($isAiScan) {
@@ -129,7 +147,7 @@ if ($brgy_res) {
 
 // ── STAT: Pending Cases (manual reports only — AI scans never need review) ──
 $totalPendingCases = 0;
-$pq = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
+$pq = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
 if ($pq) { $totalPendingCases = $pq->fetch_assoc()['cnt']; }
 
 $conn->close();
