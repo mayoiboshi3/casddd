@@ -440,7 +440,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
                 }
                 if (empty($diseaseBlocks)) { $diseaseBlocks[] = "🌽 Hindi tiyak\nWalang detalyadong paglalarawan para sa sakit na ito."; }
 
-                $caseDesc = trim($findings_row['description'] ?? '');
+                $caseDesc = trim(stripFarmerMarker($findings_row['description'] ?? ''));
                 if ($caseDesc === '') { $caseDesc = 'Walang detalyadong obserbasyon.'; }
 
                 $findingsHeader = count($diseaseBlocks) > 1 ? "Natukoy na mga Sakit:\n\n" : "Natukoy na Sakit:\n\n";
@@ -453,6 +453,19 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
         echo "<script>window.location='reports.php?view=disease&tab=" . $tab_return . "&case_id=" . $case_id . "&open_msg=1';</script>";
         exit;
     }
+}
+
+// Helper: extract farmer name from description field
+function extractFarmerName($description) {
+    if (preg_match('/^\[FARMER:(.+?)\]\n?/s', $description ?? '', $m)) {
+        return trim($m[1]);
+    }
+    return null;
+}
+
+// Helper: strip farmer marker from description for display
+function stripFarmerMarker($description) {
+    return preg_replace('/^\[FARMER:.+?\]\n?/s', '', $description ?? '');
 }
 
 // Helper: combine a case report's per-disease rows (name, description, treatment,
@@ -654,12 +667,12 @@ if ($autoOpenCaseId) {
         $ao_q = mysqli_query($conn, "SELECT dc.*, b.name AS brgy_name, d.disease_name,
             d.description AS disease_description,
             d.recommended_treatment, d.prevention_measures,
-            f.profile_farmers AS farmer_photo, f.farmer_name AS farmer_name_db,
+            f.profile_farmers AS farmer_photo,
             " . personnel_log_select_sql() . "
             FROM disease_cases dc
             LEFT JOIN barangays b  ON dc.barangay_id = b.id
             LEFT JOIN diseases d   ON dc.disease_id  = d.disease_id
-            LEFT JOIN farmers f    ON f.farmer_id = dc.farmer_id
+            LEFT JOIN farmers f    ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
             " . personnel_log_join_sql() . "
             WHERE dc.reference_id = '$ao_ref'
             ORDER BY dc.case_id ASC");
@@ -672,8 +685,8 @@ if ($autoOpenCaseId) {
             $ao_combined = combineDiseaseFields($ao_diseases);
 
             $autoOpenData = $ao_primary;
-            $autoOpenData['resolved_farmer_name'] = !empty($ao_primary['farmer_name_db']) ? $ao_primary['farmer_name_db'] : '— Unassigned —';
-            $autoOpenData['clean_description']    = $ao_primary['description'] ?? '';
+            $autoOpenData['resolved_farmer_name'] = extractFarmerName($ao_primary['description']) ?? '— Unassigned —';
+            $autoOpenData['clean_description']    = stripFarmerMarker($ao_primary['description']);
             $autoOpenData['messages']             = buildCaseMessages($conn, $ao_primary);
             $autoOpenData['disease_name']         = $ao_combined['name'];
             $autoOpenData['disease_description']  = $ao_combined['description'];
@@ -1227,12 +1240,12 @@ window.casePaginate = function (cfg) {
                     d.description AS disease_description,
                     d.recommended_treatment,
                     d.prevention_measures,
-                    f.profile_farmers AS farmer_photo, f.farmer_name AS farmer_name_db,
+                    f.profile_farmers AS farmer_photo,
                     " . personnel_log_select_sql() . "
                   FROM disease_cases dc 
                   LEFT JOIN barangays b ON dc.barangay_id = b.id 
                   LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
-                  LEFT JOIN farmers f   ON f.farmer_id = dc.farmer_id
+                  LEFT JOIN farmers f   ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
                   " . personnel_log_join_sql() . "
                   WHERE $manualOnlySqlDc $status_filter $brgy_filter $date_filter 
                   ORDER BY dc.report_date DESC, dc.case_id ASC";
@@ -1271,7 +1284,7 @@ window.casePaginate = function (cfg) {
                 $diseases = $group['diseases'];
                 $combined = combineDiseaseFields($diseases);
 
-                $farmer_display = !empty($row['farmer_name_db']) ? $row['farmer_name_db'] : '— Unassigned —';
+                $farmer_display = extractFarmerName($row['description']) ?? '— Unassigned —';
                 $sev_class = match($row['severity'] ?? '') {
                     'low'      => 'sev-low',
                     'moderate' => 'sev-moderate',
@@ -1293,7 +1306,7 @@ window.casePaginate = function (cfg) {
                     'growth_stage'  => $row['growth_stage'],
                     'farmer_name'   => $farmer_display,
                     'brgy_name'     => $row['brgy_name'] ?? '—',
-                    'description'   => $row['description'] ?? '',
+                    'description'   => stripFarmerMarker($row['description']),
                     'status'        => $row['status'],
                     'remarks'       => $row['remarks'],
                     'severity'      => $row['severity'],
@@ -1417,7 +1430,7 @@ window.casePaginate = function (cfg) {
 // How a scan row is stored (so this view reads it the same way):
 //   - disease_id is empty; the AI's answer is in the description text:
 //       "AI scan: Corn___Common_Rust detected. Confidence: 92.2%"
-//   - the farmer is identified by farmer_id.
+//   - there is no [FARMER:...] tag; the farmer is identified by farmer_id.
 //   - photo_evidence is a full path such as "uploads/scan_results/scan_5_1782904381.jpg".
 //
 // This panel deliberately does NOT use #drPanel: the AJAX tab script above swaps #drPanel and
@@ -1567,9 +1580,10 @@ if ($scan_q) {
             foreach ($scanOrder as $__sref):
                 $sg        = $scanGroups[$__sref];
                 $srow      = $sg['primary'];
-                // Farmer: the farmers table (by farmer_id), else "Farmer #id".
-                $sFarmer   = !empty($srow['farmer_name_db']) ? $srow['farmer_name_db']
-                             : ((int)($srow['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$srow['farmer_id'] : '— Unassigned —');
+                // Farmer: [FARMER:] tag if a row has one, else the farmers table (by farmer_id), else "Farmer #id".
+                $sFarmer   = extractFarmerName($srow['description'])
+                             ?? (!empty($srow['farmer_name_db']) ? $srow['farmer_name_db']
+                             : ((int)($srow['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$srow['farmer_id'] : '— Unassigned —'));
                 $sDiseases = !empty($sg['diseases']) ? implode(' + ', $sg['diseases']) : '—';
                 $sConf     = !empty($sg['confs']) ? $sg['confs'][0] : null;
                 $sConfNum  = !empty($sg['confnums']) ? $sg['confnums'][0] : null;

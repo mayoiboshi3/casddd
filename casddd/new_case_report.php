@@ -85,23 +85,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
     $ref_id       = "REF-" . date("Y") . "-" . strtoupper(substr(md5(time()), 0, 4));
     // Personnel log: the staff member creating this case by hand (0 = could not be determined).
     $reported_by  = (int) personnel_log_current_user_id($conn);
-    // The form now posts the farmer's ID (not the name) so it is saved in disease_cases.farmer_id.
-    $farmer_id    = (int) ($_POST['farmer_id'] ?? 0);
+    $farmer_name  = mysqli_real_escape_string($conn, $_POST['farmer_name']);
     $brgy_id      = mysqli_real_escape_string($conn, $_POST['brgy_id']);
     $stage        = mysqli_real_escape_string($conn, $_POST['growth_stage']);
     $date_planted = mysqli_real_escape_string($conn, $_POST['date_planted']);
     $desc         = mysqli_real_escape_string($conn, $_POST['description']);
     $severity     = mysqli_real_escape_string($conn, $_POST['severity']);
 
-    // Make sure the selected farmer really exists before saving anything.
-    $farmerCheck = $farmer_id > 0 ? mysqli_query($conn, "SELECT farmer_id FROM farmers WHERE farmer_id = $farmer_id LIMIT 1") : false;
-    if (!$farmerCheck || mysqli_num_rows($farmerCheck) === 0) {
-        echo "<script>alert('Please select a valid farmer.'); window.history.back();</script>";
-        exit;
-    }
-
-    // The description is saved exactly as typed — the farmer is NOT written into it anymore.
-    $full_desc = $desc;
+    $full_desc = "[FARMER:" . $farmer_name . "]\n" . $desc;
+    $full_desc = mysqli_real_escape_string($conn, $full_desc);
 
     // ── Handle any number of uploaded photos, store as comma-separated filenames ──
     $allowed_types  = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
@@ -135,7 +127,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
 
         $insertQuery = "INSERT INTO disease_cases
             (reference_id, disease_id, farm_id, farmer_id, barangay_id, reported_by, growth_stage, date_planted, description, severity, photo_evidence, status, report_date)
-            VALUES ('$ref_id', '$d_id', 0, $farmer_id, '$brgy_id', $reported_by, '$stage', '$date_planted', '$full_desc', '$severity', $photo_evidence_val, 'pending', NOW())";
+            VALUES ('$ref_id', '$d_id', 0, 0, '$brgy_id', $reported_by, '$stage', '$date_planted', '$full_desc', '$severity', $photo_evidence_val, 'pending', NOW())";
 
         if (mysqli_query($conn, $insertQuery)) {
             $insertedCount++;
@@ -242,12 +234,12 @@ function render_new_case_report_modal($conn, $today, $minDate) {
                         <div class="grid grid-cols-2 gap-4">
                             <div>
                                 <label class="field-label">Farmer</label>
-                                <select name="farmer_id" required class="field-input">
+                                <select name="farmer_name" required class="field-input">
                                     <option value="" disabled selected>— Select farmer —</option>
                                     <?php
-                                    $farmers = mysqli_query($conn, "SELECT farmer_id, farmer_name FROM farmers ORDER BY farmer_name ASC");
+                                    $farmers = mysqli_query($conn, "SELECT farmer_name FROM farmers ORDER BY farmer_name ASC");
                                     while ($f = mysqli_fetch_assoc($farmers)) {
-                                        echo "<option value='" . (int)$f['farmer_id'] . "'>" . htmlspecialchars($f['farmer_name']) . "</option>";
+                                        echo "<option value='" . htmlspecialchars($f['farmer_name'], ENT_QUOTES) . "'>" . htmlspecialchars($f['farmer_name']) . "</option>";
                                     } ?>
                                 </select>
                             </div>

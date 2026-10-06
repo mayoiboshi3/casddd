@@ -254,7 +254,6 @@ window.addEventListener('DOMContentLoaded',()=>{
                 $gender = $row['gender'] ?? '';
                 $status = $row['status'] ?? 'active';
                 $modal_data = [
-                    'farmer_id'      => $row['farmer_id'],
                     'farmer_name'    => $row['farmer_name'],
                     'contact_number' => $row['contact_number'],
                     'age'            => $row['age'],
@@ -394,7 +393,6 @@ window.addEventListener('DOMContentLoaded',()=>{
         <div id="panelInfo">
         <form id="updateFarmerForm" action="process_farmer.php" method="POST" enctype="multipart/form-data">
                 <input type="hidden" name="update_farmer_info" value="1">
-                <input type="hidden" name="farmer_id"         id="upd_farmer_id">
                 <input type="hidden" name="farmer_name_key"   id="upd_id">
                 <input type="file"   name="photo" id="upd_form_photo" accept="image/*" class="hidden">
 
@@ -749,7 +747,6 @@ function openUpdateModal(data) {
     setUpdView();
 
     _currentModalFarmerName = data.farmer_name;
-    _currentModalFarmerId   = data.farmer_id;
     _currentModalFarmerPhoto = data.profile_farmers || null;
     _reportsLoaded = false;
     switchModalTab('info');
@@ -767,7 +764,6 @@ function openUpdateModal(data) {
     document.getElementById('upd_header_status').innerHTML =
         `<span class="w-1.5 h-1.5 rounded-full ${isActive ? 'bg-[#3f6b52]' : 'bg-rose-400'}"></span>${data.status || 'active'}`;
 
-    document.getElementById('upd_farmer_id').value = data.farmer_id;
     document.getElementById('upd_id').value = data.farmer_name;
 
     document.getElementById('v_name').textContent    = data.farmer_name;
@@ -1056,7 +1052,6 @@ function previewEnrollImg(input, targetId) {
    MODAL TABS
 ═══════════════════════════════════════════════════ */
 let _currentModalFarmerName = null;
-let _currentModalFarmerId   = null;
 let _currentModalFarmerPhoto = null;
 let _reportsLoaded = false;
 
@@ -1068,14 +1063,14 @@ function switchModalTab(tab) {
     document.getElementById('tabBtnReports').classList.toggle('active', !isInfo);
 
     if (!isInfo && !_reportsLoaded) {
-        loadFarmerReports(_currentModalFarmerId);
+        loadFarmerReports(_currentModalFarmerName);
     }
 }
 
 /* ═══════════════════════════════════════════════════
    FETCH FARMER REPORTS
 ═══════════════════════════════════════════════════ */
-function loadFarmerReports(farmerId) {
+function loadFarmerReports(farmerName) {
     _reportsLoaded = false;
     const list    = document.getElementById('rptList');
     const summary = document.getElementById('rptSummary');
@@ -1087,7 +1082,7 @@ function loadFarmerReports(farmerId) {
         </div>`;
     summary.innerHTML = '';
 
-    fetch('get_farmers_reports.php?farmer_id=' + encodeURIComponent(farmerId))
+    fetch('get_farmers_reports.php?farmer_name=' + encodeURIComponent(farmerName))
         .then(r => r.json())
         .then(data => {
             _reportsLoaded = true;
@@ -1158,7 +1153,7 @@ function renderReports(reports, stats) {
                     </div>
                     <p class="font-black text-slate-800 text-sm truncate">${escHtml(r.disease_name || '—')}</p>
                     <p class="text-[10px] font-bold text-slate-400 mt-0.5">${escHtml(r.growth_stage || '—')} · ${date}</p>
-                    ${r.description ? `<p class="text-[10px] font-bold text-slate-500 mt-1.5 line-clamp-2">${escHtml(r.description)}</p>` : ''}
+                    ${r.description ? `<p class="text-[10px] font-bold text-slate-500 mt-1.5 line-clamp-2">${escHtml(r.description.replace(/^\[FARMER:.+?\]\n?/, ''))}</p>` : ''}
                 </div>
                 <div class="flex flex-col items-end gap-2 flex-shrink-0">
                     <div class="text-right">

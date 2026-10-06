@@ -1,8 +1,9 @@
 <?php
 /**
- * get_farmers_reports.php
- * AJAX endpoint — returns all manual disease_cases for a given farmer as JSON.
- * The farmer is identified by farmer_id (disease_cases.farmer_id).
+ * get_farmer_reports.php
+ * AJAX endpoint — returns all disease_cases for a given farmer as JSON.
+ * Farmer is now identified by name (stored as [FARMER:name] in description),
+ * since the farmers table no longer has a farmer_id primary key.
  */
 
 require_once __DIR__ . "/src/db_config.php";
@@ -10,14 +11,14 @@ require_once __DIR__ . "/src/db_config.php";
 header('Content-Type: application/json');
 
 /* ── Validate input ──────────────────────────────── */
-$farmerId = (int)($_GET['farmer_id'] ?? 0);
+$farmerName = trim($_GET['farmer_name'] ?? '');
 
-if ($farmerId <= 0) {
-    echo json_encode(['success' => false, 'message' => 'Farmer is required.']);
+if ($farmerName === '') {
+    echo json_encode(['success' => false, 'message' => 'Farmer name is required.']);
     exit;
 }
 
-/* ── Query disease_cases by farmer_id ── */
+/* ── Query disease_cases by [FARMER:name] marker in description ── */
 $stmt = $conn->prepare("
     SELECT
         dc.case_id,
@@ -41,18 +42,20 @@ $stmt = $conn->prepare("
         d.severity_level AS disease_severity_level
     FROM disease_cases dc
     LEFT JOIN diseases d ON dc.disease_id = d.disease_id
-    WHERE dc.source = 'manual_report'
-      AND dc.farmer_id = ?
+    WHERE dc.description LIKE ?
     ORDER BY dc.report_date DESC
 ");
 
-$stmt->bind_param('i', $farmerId);
+// Match the [FARMER:name] prefix stored at the start of description
+$pattern = '[FARMER:' . $farmerName . ']%';
+$stmt->bind_param('s', $pattern);
 $stmt->execute();
 $result = $stmt->get_result();
 
 $reports = [];
 while ($row = $result->fetch_assoc()) {
-    $row['description'] = $row['description'] ?? '';
+    // Strip the [FARMER:name] marker from description before sending to client
+    $row['description'] = preg_replace('/^\[FARMER:.+?\]\n?/s', '', $row['description'] ?? '');
     $row['messages']    = fetchCaseMessages($conn, $row['case_id']);
     $reports[] = $row;
 }

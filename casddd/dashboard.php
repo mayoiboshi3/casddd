@@ -91,11 +91,14 @@ if ($brgy_res) {
                     if ($c['status'] === 'resolved') $resolved_count++;
                 }
 
-                // Same wording as the Reports page: the farmers-table name, else "Farmer #id" when the
-                // farmer_id has no matching farmer, else null (shown as "Unassigned" when farmer_id is 0).
-                $c['farmer_name'] = !empty($c['farmer_name_db']) ? $c['farmer_name_db']
-                                  : ((int)($c['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$c['farmer_id'] : null);
-                $c['description'] = $c['description'] ?? '';
+                $farmerName = null;
+                if (preg_match('/^\[FARMER:(.+?)\]\n?/s', $c['description'] ?? '', $m)) {
+                    $farmerName = trim($m[1]);
+                } elseif (!empty($c['farmer_name_db'])) {
+                    $farmerName = $c['farmer_name_db'];
+                }
+                $c['farmer_name'] = $farmerName;
+                $c['description'] = preg_replace('/^\[FARMER:.+?\]\n?/s', '', $c['description'] ?? '');
 
                 // AI scans carry the detected label + confidence in the description text
                 // (e.g. "AI scan: Corn___Common_Rust detected. Confidence: 92.2%") instead
@@ -1090,7 +1093,7 @@ function buildBrgyReportCard(c) {
         <div style="min-width:0;flex:1;">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px;">
                 <div style="min-width:0;">
-                    <span style="color:#0f172a;font-size:0.86rem;font-weight:800;">${c.farmer_name || '— Unassigned —'}</span>
+                    <span style="color:#0f172a;font-size:0.86rem;font-weight:800;">${c.farmer_name || 'Unknown Reporter'}</span>
                     <span style="color:#94a3b8;font-size:0.68rem;font-weight:700;margin-left:6px;">${reportId}</span>
                 </div>
                 <div style="display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0;">${badgesHtml}</div>
