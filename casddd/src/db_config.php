@@ -1,7 +1,7 @@
 <?php
 $servername = "localhost";
 $username = "root";
-$password = "882372";
+$password = "";
 $dbname = "corncasd_db"; // Based on your file list
 
 // Ensure the variable name is $conn
