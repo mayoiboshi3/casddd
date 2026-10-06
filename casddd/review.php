@@ -952,7 +952,9 @@ function openViewModal(data) {
     const sevLabel    = document.getElementById('view_severity_label');
     const isPendingCase       = (data.status === 'pending');
     const isInfectionDisease  = INFECTION_PCT_DISEASES.includes(data.disease_name);
-    const isUnidentifiedCase  = (data.disease_name === 'Other / Unidentified');
+    // Unidentified = the web form's "Other / Unidentified" (id 999) OR a report with no disease at all
+    // (sent from the mobile app, disease_id empty — reports.php labels those plain "Unidentified").
+    const isUnidentifiedCase  = (!data.disease_name || data.disease_name === 'Other / Unidentified' || data.disease_name === 'Unidentified');
     const severityHiddenInput = document.getElementById('view_severity_hidden');
     severityHiddenInput.value = ''; // only populated below when the dropdown is actually shown
 
