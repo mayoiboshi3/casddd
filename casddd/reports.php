@@ -5,15 +5,19 @@
 ob_start();
 require_once __DIR__ . "/src/db_config.php"; 
 
+// PERFORMANCE: true when the page is being fetched by the in-page filter/tab switcher.
+$isAjax = (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest');
+$CASD_AJAX_SKIP_LAYOUT = true;
+
 // Folder (relative to this page, or a full URL path) where the AI scan photos are shown from.
-// CHANGE THIS to move the scan photos, e.g. 'uploads/scan_results' or 'scans/images'.
 define('SCAN_PHOTO_DIR', 'corn_api/uploads/scan_results');
 $pageTitle = "Reports"; 
-include "includes/layout.php"; 
+if ($isAjax && $CASD_AJAX_SKIP_LAYOUT) {
+    require_once __DIR__ . "/src/session_guard.php";   // same login check layout.php runs
+} else {
+    include "includes/layout.php";
+}
 
-// ── STYLED DIALOGS (replaces native alert()) ─────────────────────────────────
-// casd_dialog_assets() prints the dialog CSS + JS once. It also overrides window.alert,
-// so any leftover alert("...") on this page gets the same look.
 function casd_dialog_assets() {
     static $done = false;
     if ($done) return;
@@ -182,28 +186,8 @@ function casd_alert_redirect($type, $title, $message, $url, $autoCloseMs = 0) {
     echo "<script>casdAlert($msg, $payload);</script>";
 }
 
-// --- SELF-HEALING SCHEMA: case_messages table (log of sent recommendations) ---
-// Every recommendation sent becomes one timestamped entry here, instead of
-// overwriting a single "last message" field.
-$tbl_check = mysqli_query($conn, "SHOW TABLES LIKE 'case_messages'");
-if ($tbl_check && mysqli_num_rows($tbl_check) === 0) {
-    mysqli_query($conn, "CREATE TABLE case_messages (
-        message_id INT AUTO_INCREMENT PRIMARY KEY,
-        case_id INT NOT NULL,
-        sender ENUM('staff') NOT NULL DEFAULT 'staff',
-        message_text TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_case_id (case_id)
-    )");
-}
-
-// --- SELF-HEALING SCHEMA: infection_percentage column on disease_cases ---
-// Tracks the infection rate (0-100%) for Common Rust, Northern Leaf Blight,
-// Gray Leaf Spot and Healthy Corn reports, editable only while Pending.
-$col_check = mysqli_query($conn, "SHOW COLUMNS FROM disease_cases LIKE 'infection_percentage'");
-if ($col_check && mysqli_num_rows($col_check) === 0) {
-    mysqli_query($conn, "ALTER TABLE disease_cases ADD COLUMN infection_percentage DECIMAL(5,2) DEFAULT NULL AFTER total_plants");
-}
+// NOTE: the self-healing schema checks (case_messages table, infection_percentage column) were
+// removed for speed. The database must already contain them -- they do after the first load.
 
 // --- REPORT SOURCE: disease_cases.source is 'manual_report' (the default) or 'scan' ---
 // 'scan' = the AI image detector classified the photo. Those cases are listed under AI Scans
@@ -548,10 +532,32 @@ function diseaseRowSlice($row) {
     ];
 }
 
+// PERFORMANCE: one query loads the messages for every case in the list, instead of one query per row.
+$GLOBALS['__casdMsgCache'] = [];
+function preloadCaseMessages($conn, array $caseIds) {
+    $ids = array_values(array_unique(array_filter(array_map('intval', $caseIds))));
+    if (!$ids) return;
+    foreach ($ids as $id) { $GLOBALS['__casdMsgCache'][$id] = []; }
+    $q = mysqli_query($conn, "SELECT case_id, sender, message_text, created_at
+                              FROM case_messages
+                              WHERE case_id IN (" . implode(',', $ids) . ")
+                              ORDER BY created_at ASC, message_id ASC");
+    if ($q) {
+        while ($r = mysqli_fetch_assoc($q)) {
+            $GLOBALS['__casdMsgCache'][(int)$r['case_id']][] = [
+                'sender'     => $r['sender'],
+                'message'    => $r['message_text'],
+                'created_at' => $r['created_at'],
+            ];
+        }
+    }
+}
+
 // Helper: load every logged message for a case, oldest first (the chat thread)
 function fetchCaseMessages($conn, $case_id) {
     $messages = [];
     $case_id  = (int)$case_id;
+    if (isset($GLOBALS['__casdMsgCache'][$case_id])) { return $GLOBALS['__casdMsgCache'][$case_id]; }
     $q = mysqli_query($conn, "SELECT sender, message_text, created_at FROM case_messages WHERE case_id = $case_id ORDER BY created_at ASC, message_id ASC");
     if ($q) {
         while ($r = mysqli_fetch_assoc($q)) {
@@ -947,6 +953,8 @@ $tableRows = [];
     /* Visually mark out-of-range dates */
     input[type="date"]:out-of-range { border-color: #fca5a5; background: #fff1f2; }
 
+    .dr-status-pill { display:none; }
+    #drPanel[data-tab="all"] .dr-status-pill { display:inline-block; }
     .sev-badge { display:inline-block; font-size:0.58rem; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; padding:2px 8px; border-radius:999px; margin-top:3px; }
     .sev-low      { background:#d1fae5; color:#065f46; }
     .sev-moderate { background:#fef3c7; color:#92400e; }
@@ -986,7 +994,8 @@ window.casePaginate = function (cfg) {
 
     var matched = [];
     rows.forEach(function (row) {
-        var ok = !term || (row.dataset.search || '').indexOf(term) !== -1;
+        var inTab = !cfg.rowFilter || cfg.rowFilter(row);   // e.g. the active Pending/Verified/... tab
+        var ok = inTab && (!term || (row.dataset.search || '').indexOf(term) !== -1);
         if (ok) matched.push(row); else row.style.display = 'none';
     });
 
@@ -1042,7 +1051,7 @@ window.casePaginate = function (cfg) {
     return page;
 };
 </script>
-<?php casd_dialog_assets(); ?>
+<?php if (!$isAjax) { casd_dialog_assets(); } ?>
 
 <!-- ═══ REPORT TYPE SWITCHER ═══
      Always visible at the top, regardless of which view is active. This is the
@@ -1087,7 +1096,7 @@ window.casePaginate = function (cfg) {
 </div>
 <?php endif; ?>
 
-<?php render_new_case_report_modal($conn, $today, $minDate); ?>
+<?php if (!$isAjax) { render_new_case_report_modal($conn, $today, $minDate); } /* already on the page; skips 4 queries per filter change */ ?>
 
 <!-- ═══ CASE FILE LIST ═══ -->
 <div class="bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl">
@@ -1113,8 +1122,8 @@ window.casePaginate = function (cfg) {
     <!-- ── AJAX panel: tabs + filters + case list. Swapped in place via JS
          (see bottom of file) instead of a full page navigation, so switching
          between Pending / Verified / Resolved doesn't reload the page. ── -->
-    <?php render_case_calendar_assets(); ?>
-    <div id="drPanel">
+    <?php if (!$isAjax) { render_case_calendar_assets(); } ?>
+    <div id="drPanel" data-tab="<?= htmlspecialchars($activeTab) ?>">
 
     <!-- ── Tabs: same browser-tab look as the Farm Reports section ── -->
     <div class="dr-tabs-wrap">
@@ -1136,7 +1145,7 @@ window.casePaginate = function (cfg) {
                 $isActive   = ($activeTab === $tab);
                 $activeClass = $isActive ? 'dr-tab dr-tab-active' : 'dr-tab';
             ?>
-                <a href="?tab=<?= $tab ?><?= $tabQueryExtra ?>" class="<?= $activeClass ?>">
+                <a href="?tab=<?= $tab ?><?= $tabQueryExtra ?>" class="<?= $activeClass ?>" data-dr-tab="<?= $tab ?>">
                     <?= $cfg['label'] ?> <span class="dr-tab-count"><?= $cfg['count'] ?></span>
                 </a>
             <?php endforeach; ?>
@@ -1184,7 +1193,7 @@ window.casePaginate = function (cfg) {
                     Filter
                 </button>
                 <?php if ($filterBarangayId || $filterDateFrom || $filterDateTo): ?>
-                <a href="?tab=<?= htmlspecialchars($activeTab) ?>"
+                <a href="?tab=<?= htmlspecialchars($activeTab) ?>" id="drClearLink"
                     class="text-[10px] font-black text-gray-400 hover:text-gray-600 uppercase underline">
                     Clear
                 </a>
@@ -1198,13 +1207,11 @@ window.casePaginate = function (cfg) {
             </button>
         </div>
 
-        <?php if ($activeTab === 'verified' || $activeTab === 'resolved'): ?>
-        <button id="exportTabBtn" onclick="exportAllReports()"
+        <button id="exportTabBtn" onclick="exportAllReports()" style="<?= ($activeTab === 'verified' || $activeTab === 'resolved') ? '' : 'display:none' ?>"
             class="btn-intel bg-emerald-600 text-white px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-sm flex items-center gap-2 shrink-0">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H8a2 2 0 01-2-2V5a2 2 0 012-2h6l6 6v11a2 2 0 01-2 2z"/></svg>
-            Export <?= ucfirst($activeTab) ?> Reports (PDF)
+            <span class="dr-export-label">Export <?= ucfirst($activeTab) ?> Reports (PDF)</span>
         </button>
-        <?php endif; ?>
     </div>
     
     <?php
@@ -1250,7 +1257,9 @@ window.casePaginate = function (cfg) {
         // "All" shows every status (including rejected, which otherwise has
         // no tab of its own) — every other tab still filters to its status.
         $safeActiveTab = mysqli_real_escape_string($conn, $activeTab);
-        $status_filter = ($activeTab === 'all') ? '' : "AND dc.status = '$safeActiveTab'";
+        // PERFORMANCE: every status is loaded once and the Pending/Verified/Resolved/Rejected tabs filter in
+        // the browser (instant, no request). $activeTab only decides which tab is showing first.
+        $status_filter = '';
 
         $query = "SELECT dc.*, 
                     b.name AS brgy_name, 
@@ -1266,7 +1275,8 @@ window.casePaginate = function (cfg) {
                   LEFT JOIN farmers f   ON f.farmer_id = dc.farmer_id
                   " . personnel_log_join_sql() . "
                   WHERE $manualOnlySqlDc $status_filter $brgy_filter $date_filter 
-                  ORDER BY dc.report_date DESC, dc.case_id ASC";
+                  ORDER BY dc.report_date DESC, dc.case_id ASC
+                  LIMIT 2000";   // safety cap: use the barangay / date filters to narrow beyond this
         $result = mysqli_query($conn, $query);
 
         // ── GROUP ROWS BY reference_id ──
@@ -1292,6 +1302,9 @@ window.casePaginate = function (cfg) {
                 $groups[$ref]['diseases'][] = diseaseRowSlice($row);
             }
         }
+
+        // PERFORMANCE: fetch all chat threads for this list in ONE query (see preloadCaseMessages).
+        preloadCaseMessages($conn, array_map(function ($g) { return $g['primary']['case_id']; }, $groups));
 
         $tableRows = []; // collected for bulk PDF export (current tab)
 
@@ -1346,6 +1359,7 @@ window.casePaginate = function (cfg) {
                     'personnel'              => personnel_log_build($row),
                 ];
                 $tableRows[] = $modal_row;
+                $rowIdx = count($tableRows) - 1;   // row's position in #drTableRowsData
 
                 // Left-edge accent color, same idea as the Farm Reports rows
                 // (a colored strip keyed to the row's category) — keyed to the
@@ -1367,9 +1381,9 @@ window.casePaginate = function (cfg) {
                     $combined['name'] ?? '',
                 ]));
         ?>
-        <div class="dr-row" style="border-left:3px solid <?= $rowAccent ?>"
+        <div class="dr-row" data-status="<?= htmlspecialchars($row['status']) ?>" style="border-left:3px solid <?= $rowAccent ?>;<?= ($activeTab !== 'all' && $row['status'] !== $activeTab) ? 'display:none' : '' ?>"
              data-search="<?= htmlspecialchars($rowSearch) ?>"
-             onclick='openViewModal(<?= htmlspecialchars(json_encode($modal_row), ENT_QUOTES, 'UTF-8') ?>)'>
+             onclick="drOpenRow(<?= (int)$rowIdx ?>)">
             <div class="flex items-center gap-3.5 min-w-0">
                 <?php if (!empty($row['farmer_photo'])): ?>
                 <img src="uploads/<?= htmlspecialchars($row['farmer_photo']) ?>"
@@ -1400,7 +1414,7 @@ window.casePaginate = function (cfg) {
                 <?php elseif (!empty($row['severity'])): ?>
                 <span class="sev-badge <?= $sev_class ?>"><?= ucfirst($row['severity']) ?></span>
                 <?php endif; ?>
-                <?php if ($activeTab === 'all'):
+                <?php
                     $statusPillStyle = match($row['status']) {
                         'pending'  => 'background:#ffedd5;color:#c2410c',
                         'verified' => 'background:#dbeafe;color:#1d4ed8',
@@ -1409,8 +1423,7 @@ window.casePaginate = function (cfg) {
                         default    => 'background:#f3f4f6;color:#6b7280',
                     };
                 ?>
-                <span class="sev-badge" style="<?= $statusPillStyle ?>"><?= htmlspecialchars(ucfirst($row['status'])) ?></span>
-                <?php endif; ?>
+                <span class="sev-badge dr-status-pill" style="<?= $statusPillStyle ?>"><?= htmlspecialchars(ucfirst($row['status'])) ?></span>
             </div>
         </div>
         <?php endforeach; else: ?>
@@ -1422,6 +1435,9 @@ window.casePaginate = function (cfg) {
     <!-- Shown by filterDrRows() when a search term matches none of the
          currently loaded rows (distinct from the "no reports" message
          above, which covers an empty tab). -->
+    <?php if (count($groupOrder) > 0): ?>
+    <div id="drTabEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No reports in this tab.</p></div>
+    <?php endif; ?>
     <div id="drSearchEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No reports match your search</p></div>
 
     <!-- Page controls — built by filterDrRows() (client-side, 10 reports per page). -->
@@ -1430,9 +1446,14 @@ window.casePaginate = function (cfg) {
     <!-- Carries this tab's rows to the client so the PDF export button (and
          the AJAX tab-switch script below) always has the right data, even
          after switching tabs without a page reload. -->
-    <script type="application/json" id="drTableRowsData"><?= json_encode($tableRows) ?></script>
+    <script type="application/json" id="drTableRowsData"><?= json_encode($tableRows, JSON_HEX_TAG | JSON_HEX_AMP | JSON_INVALID_UTF8_SUBSTITUTE) ?></script>
 
     </div><!-- /#drPanel -->
+<?php
+// PERFORMANCE: a filter/tab request only needs #drPanel. Stop here so the review modal, PDF scripts,
+// the diseases picker query and the rest of the page are not built and sent again.
+if ($isAjax && $CASD_AJAX_SKIP_LAYOUT && $_SERVER['REQUEST_METHOD'] === 'GET' && $view === 'disease') { exit; }
+?>
 </div>
 
 <?php endif; // end $view === 'disease' ?>
@@ -1960,7 +1981,7 @@ render_review_modal($STATUS_FLOW, $allDiseasesForPicker);
 // All reports currently loaded for the active tab (used for bulk PDF export).
 // `let`, not `const` — the AJAX tab-switch script below reassigns this each
 // time the panel is swapped in, so the export button stays in sync.
-let currentTabReports = <?= json_encode($tableRows) ?>;
+let currentTabReports = <?= json_encode(array_values(array_filter($tableRows, function ($r) use ($activeTab) { return $activeTab === 'all' || $r['status'] === $activeTab; }))) ?>;
 
 <?php include __DIR__ . '/pdf_generator.php'; ?>
 
@@ -2042,33 +2063,96 @@ window.addEventListener('DOMContentLoaded', function() {
 
         // Keep the PDF export button's data in sync with whichever tab is
         // now showing (each panel carries its own rows in a JSON island).
-        var dataEl = newPanel.querySelector('#drTableRowsData');
-        if (dataEl) {
-            try { currentTabReports = JSON.parse(dataEl.textContent || '[]'); }
-            catch (e) { /* keep the previous data rather than break export */ }
-        }
+        syncCurrentTabReports(newPanel, newPanel.dataset.tab || 'all');
 
         if (pushState) {
             history.pushState({ drPanel: true }, '', url);
         }
     }
 
+    // All rows of the panel (every status), parsed once from the JSON island and cached on it.
+    function panelRows(el) {
+        if (!el) return [];
+        if (!el._rows) {
+            try { el._rows = JSON.parse(el.textContent || '[]'); } catch (e) { el._rows = []; }
+        }
+        return el._rows;
+    }
+
+    // Keep the PDF export data equal to the rows of the tab that is showing.
+    function syncCurrentTabReports(panel, tab) {
+        var dataEl = panel && panel.querySelector('#drTableRowsData');
+        if (!dataEl) return;
+        currentTabReports = panelRows(dataEl).filter(function (r) { return tab === 'all' || r.status === tab; });
+    }
+
+    // Pending / Verified / Resolved / Rejected / All: switch in the browser, no request to the server.
+    window.drSetTab = function (tab) {
+        var panel = getPanel();
+        if (!panel) return;
+        panel.dataset.tab = tab;
+        panel.querySelectorAll('.dr-tabs .dr-tab').forEach(function (a) {
+            a.classList.toggle('dr-tab-active', a.dataset.drTab === tab);
+        });
+        var hid = panel.querySelector('input[name="tab"]');
+        if (hid) hid.value = tab;
+        var clear = panel.querySelector('#drClearLink');
+        if (clear) clear.setAttribute('href', '?tab=' + tab);
+        var exp = panel.querySelector('#exportTabBtn');
+        if (exp) {
+            exp.style.display = (tab === 'verified' || tab === 'resolved') ? '' : 'none';
+            var lbl = exp.querySelector('.dr-export-label');
+            if (lbl) lbl.textContent = 'Export ' + tab.charAt(0).toUpperCase() + tab.slice(1) + ' Reports (PDF)';
+        }
+        syncCurrentTabReports(panel, tab);
+        window.drRenderPage(1, false);
+        try {   // keep the address bar shareable / refreshable without adding history entries
+            var u = new URL(window.location.href);
+            u.searchParams.set('tab', tab);
+            history.replaceState({ drPanel: true }, '', u.toString());
+        } catch (e) {}
+    };
+
+    // PERFORMANCE / RELIABILITY: only the newest request may update the panel. Older in-flight
+    // requests are cancelled, so a slow earlier response can no longer overwrite a newer filter,
+    // and a cancelled request no longer triggers the full-page-reload fallback.
+    var currentReq = null;
+
     function loadPanel(url, pushState) {
+        if (currentReq) { currentReq.abort(); }
+        var ctrl = currentReq = new AbortController();
+
         var panel = getPanel();
         if (panel) panel.classList.add('dr-panel-loading');
 
-        fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+        fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, signal: ctrl.signal })
             .then(function (resp) {
                 if (!resp.ok) throw new Error('Request failed: ' + resp.status);
                 return resp.text();
             })
-            .then(function (html) { swapPanel(html, url, pushState); })
-            .catch(function () { window.location.href = url; })
+            .then(function (html) {
+                if (ctrl !== currentReq) return;          // superseded by a newer request
+                swapPanel(html, url, pushState);
+            })
+            .catch(function (err) {
+                if (err && err.name === 'AbortError') return;   // cancelled on purpose
+                if (ctrl !== currentReq) return;
+                window.location.href = url;
+            })
             .finally(function () {
+                if (ctrl !== currentReq) return;          // newer request owns the loading state
+                currentReq = null;
                 var p = getPanel();
                 if (p) p.classList.remove('dr-panel-loading');
             });
     }
+
+    // Clicking a report row: look its data up in the panel's JSON island (sent once per panel)
+    // instead of every row carrying its own full copy in the onclick attribute.
+    window.drOpenRow = function (i) {
+        var rows = panelRows(document.getElementById('drTableRowsData'));
+        if (rows[i] && typeof openViewModal === 'function') { openViewModal(rows[i]); }
+    };
 
     window.drLoadPanel = loadPanel;   // used by the calendar to filter by day
 
@@ -2078,6 +2162,7 @@ window.addEventListener('DOMContentLoaded', function() {
         var link = e.target.closest('#' + PANEL_ID + ' a[href^="?"]');
         if (!link) return;
         e.preventDefault();
+        if (link.dataset.drTab) { window.drSetTab(link.dataset.drTab); return; }   // tab: no fetch
         loadPanel(link.getAttribute('href'), true);
     });
 
@@ -2103,11 +2188,20 @@ window.addEventListener('DOMContentLoaded', function() {
     // globally (not re-bound per panel) since #drPanel gets replaced whole
     // on every tab switch; this just re-queries the DOM each time it runs.
     window.drRenderPage = function (page, scrollToList) {
+        var panel = getPanel();
+        if (!panel) return;
+        var tab = panel.dataset.tab || 'all';
+        var rowFilter = function (row) { return tab === 'all' || row.dataset.status === tab; };
         window.casePaginate({
-            panel: getPanel(), rowSel: '.dr-row', inputSel: '#drSearchInput', emptySel: '#drSearchEmpty',
+            panel: panel, rowSel: '.dr-row', inputSel: '#drSearchInput', emptySel: '#drSearchEmpty',
             pagerSel: '#drPager', listSel: '#drList', page: page, scroll: scrollToList,
-            scrollSel: '.dr-tabs-wrap', noun: 'reports'
+            scrollSel: '.dr-tabs-wrap', noun: 'reports', rowFilter: rowFilter
         });
+        var inTab = 0;
+        panel.querySelectorAll('.dr-row').forEach(function (r) { if (rowFilter(r)) inTab++; });
+        var te = panel.querySelector('#drTabEmpty');
+        if (te) te.classList.toggle('hidden', inTab > 0);
+        if (inTab === 0) { var se = panel.querySelector('#drSearchEmpty'); if (se) se.classList.add('hidden'); }
     };
 
     // Typing in the search box goes back to page 1 of the matches.

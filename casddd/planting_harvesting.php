@@ -40,57 +40,10 @@ require_once __DIR__ . '/personnel_log.php';
 // Month-view calendar of reports per day (shared with the Disease Reports screen)
 require_once __DIR__ . '/case_calendar.php';
 
-// --- SELF-HEALING SCHEMA: 'source' column on planting_harvesting_reports ---
-// Lets us tell farmer-submitted reports apart from ones a staff member typed
-// in manually via the "+ Add Report" button below.
-$ph_col_check = mysqli_query($conn, "SHOW COLUMNS FROM planting_harvesting_reports LIKE 'source'");
-if ($ph_col_check && mysqli_num_rows($ph_col_check) === 0) {
-    mysqli_query($conn, "ALTER TABLE planting_harvesting_reports ADD COLUMN source ENUM('farmer','staff') NOT NULL DEFAULT 'farmer' AFTER report_type");
-}
-
-// --- SELF-HEALING SCHEMA: 'growth' & 'damage' field reports ---
-// The farmer app now also submits Growth and Damage reports (free-text
-// description + photo + GPS fix) alongside Planting/Harvesting. This brings
-// the table up to date with that shape WITHOUT touching the existing
-// planting/harvesting-only columns (source, planting_stage, source_report_id,
-// the 'cassava' crop option, etc.) — the two report families just share one
-// table, same as before.
-$ph_type_check = mysqli_query($conn, "SHOW COLUMNS FROM planting_harvesting_reports LIKE 'report_type'");
-$ph_type_row   = $ph_type_check ? mysqli_fetch_assoc($ph_type_check) : null;
-if ($ph_type_row && strpos($ph_type_row['Type'], "'damage'") === false) {
-    mysqli_query($conn, "ALTER TABLE planting_harvesting_reports
-        MODIFY report_type ENUM('planting','harvesting','damage','growth') NOT NULL");
-}
-// Growth/Damage reports don't have a crop or an area — both columns need to
-// become nullable (they were NOT NULL, planting/harvesting-only, before).
-$ph_crop_check = mysqli_query($conn, "SHOW COLUMNS FROM planting_harvesting_reports LIKE 'crop_type'");
-$ph_crop_row   = $ph_crop_check ? mysqli_fetch_assoc($ph_crop_check) : null;
-if ($ph_crop_row && strtoupper($ph_crop_row['Null']) === 'NO') {
-    mysqli_query($conn, "ALTER TABLE planting_harvesting_reports
-        MODIFY crop_type ENUM('yellow_corn','white_corn','cassava') DEFAULT NULL");
-}
-$ph_area_check = mysqli_query($conn, "SHOW COLUMNS FROM planting_harvesting_reports LIKE 'area_hectares'");
-$ph_area_row   = $ph_area_check ? mysqli_fetch_assoc($ph_area_check) : null;
-if ($ph_area_row && strtoupper($ph_area_row['Null']) === 'NO') {
-    mysqli_query($conn, "ALTER TABLE planting_harvesting_reports
-        MODIFY area_hectares DECIMAL(10,2) DEFAULT NULL");
-}
-// New columns Growth/Damage reports need, carried over from the farmer app's
-// side of this table.
-$ph_new_columns = [
-    'description'  => "TEXT DEFAULT NULL AFTER crop_type",
-    'photo'        => "VARCHAR(255) DEFAULT NULL AFTER description",
-    'latitude'     => "DECIMAL(10,7) DEFAULT NULL AFTER photo",
-    'longitude'    => "DECIMAL(10,7) DEFAULT NULL AFTER latitude",
-    'gps_accuracy' => "DECIMAL(10,2) DEFAULT NULL AFTER longitude",
-    'altitude'     => "DECIMAL(10,2) DEFAULT NULL AFTER gps_accuracy",
-];
-foreach ($ph_new_columns as $ph_col_name => $ph_col_def) {
-    $ph_chk = mysqli_query($conn, "SHOW COLUMNS FROM planting_harvesting_reports LIKE '$ph_col_name'");
-    if ($ph_chk && mysqli_num_rows($ph_chk) === 0) {
-        mysqli_query($conn, "ALTER TABLE planting_harvesting_reports ADD COLUMN $ph_col_name $ph_col_def");
-    }
-}
+// NOTE: the self-healing schema checks (11 SHOW COLUMNS queries + ALTERs on every request) were removed
+// for speed. planting_harvesting_reports must already contain: source, report_type (with 'damage' and
+// 'growth'), nullable crop_type / area_hectares, description, photo, latitude, longitude, gps_accuracy,
+// altitude. They do if this page has loaded once before.
 
 // One-way status flow, same idea as $STATUS_FLOW above for disease_cases —
 // once a report is verified or rejected it is locked. Rejected reports are KEPT
