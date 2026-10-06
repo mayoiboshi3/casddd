@@ -7,6 +7,7 @@ $conn = new mysqli('localhost', 'root', '', 'corncasd_db');
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
+$conn->set_charset('utf8mb4'); // so names like "Bañadero" come through intact
 
 // ── STAT: Total Farmers ──
 $totalFarmers = 0;
@@ -14,15 +15,21 @@ $f = $conn->query("SELECT COUNT(*) AS cnt FROM farmers WHERE status = 'active'")
 if ($f) { $totalFarmers = $f->fetch_assoc()['cnt']; }
 
 
-// ── STAT: Active Reports (pending + verified) ──
+// ── STAT: Active Reports (pending + verified) — manual reports only; AI scans
+// don't need review, so they're excluded here and counted separately below. ──
 $totalActiveReports = 0;
-$r = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status IN ('pending','verified')");
+$r = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
 if ($r) { $totalActiveReports = $r->fetch_assoc()['cnt']; }
 
-// ── STAT: Verified Cases ──
+// ── STAT: Verified Cases (manual reports only) ──
 $totalVerifiedCases = 0;
-$v = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'verified'");
+$v = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
 if ($v) { $totalVerifiedCases = $v->fetch_assoc()['cnt']; }
+
+// ── STAT: AI Scans — auto-classified cases that don't require review ──
+$totalAiScans = 0;
+$as = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
+if ($as) { $totalAiScans = $as->fetch_assoc()['cnt']; }
 
 // ── BUILD BARANGAY DATA ──
 $barangayData = [];
@@ -33,56 +40,77 @@ if ($brgy_res) {
         $brgy_id   = (int)$row['id'];
         $brgy_name = $row['name'];
 
-        $counts_res = $conn->query("
-            SELECT dc.status, COUNT(*) AS cnt
+        // Single query for both the counts and the case list — AI-scanned cases
+        // (source = 'scan') don't need review, so they're tallied separately as
+        // ai_scan_count instead of being folded into pending/verified/resolved.
+        $cases_res = $conn->query("
+            SELECT dc.case_id, dc.reference_id, dc.status, dc.report_date,
+                   dc.severity, dc.plants_affected, dc.total_plants,
+                   dc.infection_percentage, dc.description, dc.photo_evidence,
+                   dc.source, dc.farmer_id, f.farmer_name AS farmer_name_db, d.disease_name
             FROM disease_cases dc
+            LEFT JOIN diseases d ON dc.disease_id = d.disease_id
+            LEFT JOIN farmers f  ON f.farmer_id = dc.farmer_id
             WHERE dc.barangay_id = $brgy_id
               AND dc.status IN ('pending','verified','resolved')
-            GROUP BY dc.status
+            ORDER BY dc.report_date DESC
         ");
 
         $pending_count  = 0;
         $verified_count = 0;
         $resolved_count = 0;
-        if ($counts_res) {
-            while ($c = $counts_res->fetch_assoc()) {
-                if ($c['status'] === 'pending')  $pending_count  = (int)$c['cnt'];
-                if ($c['status'] === 'verified') $verified_count = (int)$c['cnt'];
-                if ($c['status'] === 'resolved') $resolved_count = (int)$c['cnt'];
+        $ai_scan_count  = 0;
+        $cases = [];
+        if ($cases_res) {
+            while ($c = $cases_res->fetch_assoc()) {
+                $isAiScan = ($c['source'] === 'scan');
+
+                if ($isAiScan) {
+                    $ai_scan_count++;
+                } else {
+                    if ($c['status'] === 'pending')  $pending_count++;
+                    if ($c['status'] === 'verified') $verified_count++;
+                    if ($c['status'] === 'resolved') $resolved_count++;
+                }
+
+                $farmerName = null;
+                if (preg_match('/^\[FARMER:(.+?)\]\n?/s', $c['description'] ?? '', $m)) {
+                    $farmerName = trim($m[1]);
+                } elseif (!empty($c['farmer_name_db'])) {
+                    $farmerName = $c['farmer_name_db'];
+                }
+                $c['farmer_name'] = $farmerName;
+                $c['description'] = preg_replace('/^\[FARMER:.+?\]\n?/s', '', $c['description'] ?? '');
+
+                // AI scans carry the detected label + confidence in the description text
+                // (e.g. "AI scan: Corn___Common_Rust detected. Confidence: 92.2%") instead
+                // of a disease_id, so pull it out for display.
+                $c['ai_label']      = null;
+                $c['ai_confidence'] = null;
+                if ($isAiScan) {
+                    if (preg_match('/AI scan:\s*(.+?)\s+detected\b/i', (string)$c['description'], $lm)) {
+                        $c['ai_label'] = trim(str_replace('_', ' ', preg_replace('/^Corn_+/i', '', trim($lm[1]))));
+                    }
+                    if (preg_match('/Confidence:\s*([\d.]+)\s*%/i', (string)$c['description'], $cm)) {
+                        $c['ai_confidence'] = rtrim(rtrim(number_format((float)$cm[1], 1), '0'), '.') . '%';
+                    }
+                }
+
+                $c['is_ai_scan']  = $isAiScan;
+                $cases[] = $c;
             }
         }
 
         $total_active = $pending_count + $verified_count;
-        $total_all    = $total_active + $resolved_count;
+        $total_all    = $total_active + $resolved_count + $ai_scan_count;
 
+        // Highlight state is driven only by cases that actually need review —
+        // AI scans never push a barangay into the "waiting for review" glow.
+        // Pending takes priority over verified: a barangay with any pending case
+        // still needs attention, so there's no separate "mixed" state.
         $highlight = 'none';
-        if ($verified_count > 0 && $pending_count > 0) $highlight = 'mixed';
-        elseif ($verified_count > 0)                    $highlight = 'verified';
-        elseif ($pending_count > 0)                     $highlight = 'pending';
-
-        $cases = [];
-        $cases_res = $conn->query("
-            SELECT dc.case_id, dc.reference_id, dc.status, dc.report_date,
-                   dc.severity, dc.plants_affected, dc.total_plants,
-                   dc.infection_percentage, dc.description, dc.photo_evidence,
-                   d.disease_name
-            FROM disease_cases dc
-            LEFT JOIN diseases d ON dc.disease_id = d.disease_id
-            WHERE dc.barangay_id = $brgy_id
-              AND dc.status IN ('pending','verified','resolved')
-            ORDER BY dc.report_date DESC
-        ");
-        if ($cases_res) {
-            while ($c = $cases_res->fetch_assoc()) {
-                $farmerName = null;
-                if (preg_match('/^\[FARMER:(.+?)\]\n?/s', $c['description'] ?? '', $m)) {
-                    $farmerName = trim($m[1]);
-                }
-                $c['farmer_name'] = $farmerName;
-                $c['description'] = preg_replace('/^\[FARMER:.+?\]\n?/s', '', $c['description'] ?? '');
-                $cases[] = $c;
-            }
-        }
+        if ($pending_count > 0)       $highlight = 'pending';
+        elseif ($verified_count > 0)  $highlight = 'verified';
 
         $barangayData[$brgy_id] = [
             'name'            => $brgy_name,
@@ -90,17 +118,18 @@ if ($brgy_res) {
             'pending_count'   => $pending_count,
             'verified_count'  => $verified_count,
             'resolved_count'  => $resolved_count,
+            'ai_scan_count'   => $ai_scan_count,
             'total_active'    => $total_active,
             'total_all'       => $total_all,
-            'has_report'      => $total_active > 0,
+            'has_report'      => ($total_active > 0 || $ai_scan_count > 0),
             'cases'           => $cases,
         ];
     }
 }
 
-// ── STAT: Pending Cases ──
+// ── STAT: Pending Cases (manual reports only — AI scans never need review) ──
 $totalPendingCases = 0;
-$pq = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'pending'");
+$pq = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
 if ($pq) { $totalPendingCases = $pq->fetch_assoc()['cnt']; }
 
 $conn->close();
@@ -140,15 +169,15 @@ main { display: flex; width: 100%; height: 100vh; }
 /* ── PENDING BLINK ANIMATION ── */
 @keyframes pendingBlink {
     0%,100% {
-        filter: drop-shadow(0 0 5px rgba(239,68,68,1))
-                drop-shadow(0 0 14px rgba(239,68,68,0.85))
-                drop-shadow(0 0 28px rgba(239,68,68,0.5));
-        stroke: rgba(239,68,68,1);
+        filter: drop-shadow(0 0 5px rgba(249,115,22,1))
+                drop-shadow(0 0 14px rgba(249,115,22,0.85))
+                drop-shadow(0 0 28px rgba(249,115,22,0.5));
+        stroke: rgba(249,115,22,1);
         opacity: 1;
     }
     50% {
-        filter: drop-shadow(0 0 2px rgba(239,68,68,0.25));
-        stroke: rgba(239,68,68,0.35);
+        filter: drop-shadow(0 0 2px rgba(249,115,22,0.25));
+        stroke: rgba(249,115,22,0.35);
         opacity: 0.7;
     }
 }
@@ -163,17 +192,12 @@ main { display: flex; width: 100%; height: 100vh; }
     stroke: rgba(59,130,246,0.8);
     stroke-width: 1px;
 }
-#map-3d-wrap svg path.status-mixed {
-    filter: drop-shadow(0 0 6px rgba(245,158,11,0.9)) drop-shadow(0 0 14px rgba(245,158,11,0.6));
-    stroke: rgba(245,158,11,0.8);
-    stroke-width: 1px;
-}
 #map-3d-wrap svg path.status-pending:hover {
     animation: none;
     filter: brightness(1.6)
-            drop-shadow(0 10px 18px rgba(239,68,68,0.8))
-            drop-shadow(0 0 20px rgba(239,68,68,0.5));
-    stroke: #ff6b6b;
+            drop-shadow(0 10px 18px rgba(249,115,22,0.8))
+            drop-shadow(0 0 20px rgba(249,115,22,0.5));
+    stroke: #fdba74;
 }
 .brgy-badge {
     position: absolute;
@@ -226,7 +250,9 @@ main { display: flex; width: 100%; height: 100vh; }
     backdrop-filter: blur(5px);
 }
 
-/* ── POPUP — white card, black & white theme, flex column so inner area scrolls ── */
+/* ── POPUP — white card, black & white theme. FIXED size: it never grows or shrinks with the
+      number of cases. Only the report list scrolls; header/tabs/search stay on top and the
+      footer buttons (View All Reports / Close) stay pinned to the bottom. ── */
 #brgy-popup {
     position: fixed;
     top: 50%;
@@ -236,12 +262,13 @@ main { display: flex; width: 100%; height: 100vh; }
     border: 1px solid #e2e8f0;
     border-radius: 22px;
     padding: 30px 32px 26px;
+    box-sizing: border-box;
     width: min(600px, 92vw);
-    max-height: 90vh;
+    height: min(800px, 90vh);
+    height: min(800px, 90dvh);
     display: flex;
     flex-direction: column;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
     z-index: 9999;
     box-shadow: 0 30px 70px rgba(0,0,0,0.4);
     animation: popIn .2s ease;
@@ -349,8 +376,18 @@ main { display: flex; width: 100%; height: 100vh; }
     display: flex;
     flex-direction: column;
     gap: 10px;
+    flex: 1 1 0;          /* takes all the space between the search row and the footer */
+    min-height: 0;        /* lets it shrink so it scrolls instead of stretching the popup */
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;   /* keeps the scrollbar off the cards */
 }
+/* Everything except the list keeps its natural height (header, tabs, search, footer). */
+#brgy-popup > *:not(.brgy-report-list) { flex-shrink: 0; }
+/* Footer sits at the very bottom even when the list is short or empty. */
+#brgy-popup > .brgy-popup-footer { margin-top: 14px; }
 .brgy-report-card {
+    flex-shrink: 0;
     display: flex;
     gap: 10px;
     background: #ffffff;
@@ -370,6 +407,7 @@ main { display: flex; width: 100%; height: 100vh; }
 }
 .brgy-report-icon svg { width: 14px; height: 14px; }
 .brgy-no-match, .brgy-no-cases {
+    margin: auto;         /* centres the empty-state message inside the fixed-height list */
     color: #94a3b8;
     font-size: 0.82rem;
     padding: 20px 0;
@@ -449,6 +487,13 @@ main { display: flex; width: 100%; height: 100vh; }
 .dcard-bar { height: 3px; background: rgba(0,0,0,0.06); border-radius: 999px; overflow: hidden; }
 .dcard-bar div { height: 100%; border-radius: 999px; transition: width 1s ease; }
 
+@media (max-width: 1100px) {
+    #dashboard-stat-grid { grid-template-columns: repeat(3,1fr) !important; }
+}
+@media (max-width: 640px) {
+    #dashboard-stat-grid { grid-template-columns: repeat(2,1fr) !important; }
+}
+
 /* ── MAP FILTER STATES ── */
 #map-3d-wrap svg path.map-dimmed {
     opacity: 0.18;
@@ -456,30 +501,30 @@ main { display: flex; width: 100%; height: 100vh; }
     animation: none !important;
 }
 #map-3d-wrap svg path.map-highlighted-active {
-    fill: #facc15 !important;
-    filter: drop-shadow(0 0 8px rgba(250,204,21,1))
-            drop-shadow(0 0 20px rgba(250,204,21,0.85))
-            drop-shadow(0 0 40px rgba(250,204,21,0.5)) !important;
-    stroke: #fde68a !important;
+    fill: #16a34a !important;
+    filter: drop-shadow(0 0 8px rgba(22,163,74,1))
+            drop-shadow(0 0 20px rgba(22,163,74,0.85))
+            drop-shadow(0 0 40px rgba(22,163,74,0.5)) !important;
+    stroke: #86efac !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
     animation: none !important;
 }
 #map-3d-wrap svg path.map-highlighted-pending {
-    fill: #ff1a1a !important;
-    filter: drop-shadow(0 0 8px rgba(255,26,26,1))
-            drop-shadow(0 0 20px rgba(255,26,26,0.85))
-            drop-shadow(0 0 40px rgba(255,26,26,0.5)) !important;
-    stroke: #ff6666 !important;
+    fill: #f97316 !important;
+    filter: drop-shadow(0 0 8px rgba(249,115,22,1))
+            drop-shadow(0 0 20px rgba(249,115,22,0.85))
+            drop-shadow(0 0 40px rgba(249,115,22,0.5)) !important;
+    stroke: #fdba74 !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
 #map-3d-wrap svg path.map-highlighted-verified {
-    fill: #1a6aff !important;
-    filter: drop-shadow(0 0 8px rgba(26,106,255,1))
-            drop-shadow(0 0 20px rgba(26,106,255,0.85))
-            drop-shadow(0 0 40px rgba(26,106,255,0.5)) !important;
-    stroke: #66aaff !important;
+    fill: #3b82f6 !important;
+    filter: drop-shadow(0 0 8px rgba(59,130,246,1))
+            drop-shadow(0 0 20px rgba(59,130,246,0.85))
+            drop-shadow(0 0 40px rgba(59,130,246,0.5)) !important;
+    stroke: #93c5fd !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
@@ -492,10 +537,21 @@ main { display: flex; width: 100%; height: 100vh; }
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
+#map-3d-wrap svg path.map-highlighted-scan {
+    fill: #8b5cf6 !important;
+    filter: drop-shadow(0 0 8px rgba(139,92,246,1))
+            drop-shadow(0 0 20px rgba(139,92,246,0.85))
+            drop-shadow(0 0 40px rgba(139,92,246,0.5)) !important;
+    stroke: #c4b5fd !important;
+    stroke-width: 1.5px !important;
+    opacity: 1 !important;
+    animation: none !important;
+}
 #map-3d-wrap svg path.map-highlighted-active:hover,
 #map-3d-wrap svg path.map-highlighted-pending:hover,
 #map-3d-wrap svg path.map-highlighted-verified:hover,
-#map-3d-wrap svg path.map-highlighted-affected:hover {
+#map-3d-wrap svg path.map-highlighted-affected:hover,
+#map-3d-wrap svg path.map-highlighted-scan:hover {
     transform: translateY(-12px) scale(1.05) !important;
     animation: none !important;
 }
@@ -519,7 +575,7 @@ main { display: flex; width: 100%; height: 100vh; }
 </div>
 
 <!-- ── STAT CARDS ── -->
-<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;">
+<div id="dashboard-stat-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:20px;">
 
     <!-- Farmers -->
     <div class="dcard" style="--accent:#10b981;--accent-bg:rgba(16,185,129,0.08);--accent-border:rgba(16,185,129,0.2);">
@@ -566,18 +622,32 @@ main { display: flex; width: 100%; height: 100vh; }
     </div>
 
     <!-- Active Reports -->
-    <div class="dcard filterable" data-filter="active" style="--accent:#f59e0b;--accent-bg:rgba(245,158,11,0.08);--accent-border:rgba(245,158,11,0.2);--accent-color:#f59e0b;">
+    <div class="dcard filterable" data-filter="active" style="--accent:#16a34a;--accent-bg:rgba(22,163,74,0.08);--accent-border:rgba(22,163,74,0.2);--accent-color:#16a34a;">
         <div class="dcard-shine"></div>
         <div class="dcard-top">
-            <div class="dcard-iconbox" style="background:rgba(245,158,11,0.12);color:#f59e0b;">
+            <div class="dcard-iconbox" style="background:rgba(22,163,74,0.12);color:#16a34a;">
                 <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
             </div>
-            <span class="dcard-badge" style="color:#f59e0b;background:rgba(245,158,11,0.1);">Needs Review</span>
+            <span class="dcard-badge" style="color:#16a34a;background:rgba(22,163,74,0.1);">Needs Review</span>
         </div>
         <strong class="dcard-num"><?php echo number_format($totalActiveReports); ?></strong>
         <p class="dcard-label">Active Reports</p>
-        <div class="dcard-bar"><div style="width:<?php echo min(100,($totalActiveReports/50)*100); ?>%;background:#f59e0b;"></div></div>
-        <p style="font-size:9px;color:#f59e0b;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;margin-top:8px;opacity:0.7;">▼ Click to filter map</p>
+        <div class="dcard-bar"><div style="width:<?php echo min(100,($totalActiveReports/50)*100); ?>%;background:#16a34a;"></div></div>
+        <p style="font-size:9px;color:#16a34a;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;margin-top:8px;opacity:0.7;">▼ Click to filter map</p>
+    </div>
+
+    <!-- AI Scans -->
+    <div class="dcard filterable" data-filter="ai_scan" style="--accent:#8b5cf6;--accent-bg:rgba(139,92,246,0.08);--accent-border:rgba(139,92,246,0.2);--accent-color:#8b5cf6;">
+        <div class="dcard-shine"></div>
+        <div class="dcard-top">
+            <div class="dcard-iconbox" style="background:rgba(139,92,246,0.12);color:#8b5cf6;">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2M12 8v8m-4-4h8"/></svg>
+            </div>
+        </div>
+        <strong class="dcard-num"><?php echo number_format($totalAiScans); ?></strong>
+        <p class="dcard-label">AI Scans</p>
+        <div class="dcard-bar"><div style="width:<?php echo min(100,($totalAiScans/50)*100); ?>%;background:#8b5cf6;"></div></div>
+        <p style="font-size:9px;color:#8b5cf6;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;margin-top:8px;opacity:0.7;">▼ Click to filter map</p>
     </div>
 
 </div>
@@ -589,9 +659,9 @@ main { display: flex; width: 100%; height: 100vh; }
     <!-- Legend -->
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-shrink:0;">
         <div class="map-legend">
-            <span><span class="legend-dot" style="background:#ef4444;box-shadow:0 0 6px #ef4444;"></span>Pending Cases</span>
+            <span><span class="legend-dot" style="background:#f97316;box-shadow:0 0 6px #f97316;"></span>Pending Cases</span>
             <span><span class="legend-dot" style="background:#3b82f6;box-shadow:0 0 6px #3b82f6;"></span>Verified Cases</span>
-            <span><span class="legend-dot" style="background:#f59e0b;box-shadow:0 0 6px #f59e0b;"></span>Pending + Verified</span>
+            <span><span class="legend-dot" style="background:#8b5cf6;box-shadow:0 0 6px #8b5cf6;"></span>AI Scans</span>
             <span><span class="legend-dot" style="background:#22c55e;"></span>No Active Cases</span>
         </div>
         <div style="font-size:10px;color:rgba(255,255,255,0.6);font-weight:700;">Click a barangay for details</div>
@@ -682,7 +752,12 @@ main { display: flex; width: 100%; height: 100vh; }
 </div>
 
 <script>
-const barangayData = <?php echo json_encode($barangayData); ?>;
+const barangayData = <?php echo json_encode($barangayData, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_UNICODE); ?>;
+
+// ── Shared state for the currently-open barangay popup's report list ──
+let currentBrgyCases = [];
+let currentBrgyName  = '';
+let brgyFilterState  = { status: 'all', search: '', date: '' };
 
 // ── Shared state for the currently-open barangay popup's report list ──
 let currentBrgyCases = [];
@@ -690,7 +765,15 @@ let currentBrgyName  = '';
 let brgyFilterState  = { status: 'all', search: '', date: '' };
 
 function normalizeName(str) {
-    return str.replace(/_/g, ' ').trim().toUpperCase();
+    // Strip accents so "Bañadero" (DB) matches the SVG path id "BANADERO".
+    // Also repairs the common mojibake form of ñ/Ñ ("Ã±" / "Ã‘") just in case.
+    return String(str)
+        .replace(/Ã±/g, 'n').replace(/Ã‘/g, 'N')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/_/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toUpperCase();
 }
 
 function findBarangayByPathId(pathId) {
@@ -725,18 +808,20 @@ function applyMapFilter(filterType) {
     allPaths.forEach(path => {
         const match = findBarangayByPathId(path.id);
         const data  = match ? match.data : null;
-        path.classList.remove('map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected');
+        path.classList.remove('map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected','map-highlighted-scan');
 
         let qualifies = false;
         if (filterType === 'active'   && data && data.total_active   > 0) qualifies = true;
         if (filterType === 'pending'  && data && data.pending_count  > 0) qualifies = true;
         if (filterType === 'verified' && data && data.verified_count > 0) qualifies = true;
         if (filterType === 'affected' && data && data.total_active   > 0) qualifies = true;
+        if (filterType === 'ai_scan'  && data && data.ai_scan_count  > 0) qualifies = true;
 
         if (qualifies) {
             const cls = filterType === 'active'   ? 'map-highlighted-active'
                       : filterType === 'pending'  ? 'map-highlighted-pending'
                       : filterType === 'verified' ? 'map-highlighted-verified'
+                      : filterType === 'ai_scan'  ? 'map-highlighted-scan'
                       :                             'map-highlighted-affected';
             path.classList.add(cls);
         } else {
@@ -767,11 +852,36 @@ const label = document.getElementById('brgy-label');
 document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
     path.addEventListener('mouseenter', function() {
         const match = findBarangayByPathId(this.id);
-        const name  = match ? match.data.name : this.id.replace(/_/g, ' ');
-        const total = match ? match.data.total_active : 0;
-        const isPending = match && match.data.highlight === 'pending';
-        label.innerHTML = name.toUpperCase() +
-            (total > 0 ? ` <span style="font-size:10px;background:${isPending?'#ef4444':'#3b82f6'};color:#fff;padding:1px 6px;border-radius:999px;margin-left:6px;">${total} case${total>1?'s':''}</span>` : '');
+        const name = match ? match.data.name : this.id.replace(/_/g, ' ');
+        const data = match ? match.data : null;
+        let badge = '';
+
+        if (activeFilter && data) {
+            // A map filter is active — show the count for THAT filter only, so a barangay
+            // highlighted under "Pending" reads as pending cases, not its overall total.
+            const filterInfo = {
+                pending:  { count: data.pending_count,  color: '#f97316', label: 'pending',  plural: false },
+                verified: { count: data.verified_count, color: '#3b82f6', label: 'verified', plural: false },
+                active:   { count: data.total_active,   color: '#16a34a', label: 'active',   plural: false },
+                ai_scan:  { count: data.ai_scan_count,  color: '#8b5cf6', label: 'AI scan',  plural: true  },
+            }[activeFilter];
+            if (filterInfo && filterInfo.count > 0) {
+                const suffix = (filterInfo.plural && filterInfo.count > 1) ? 's' : '';
+                badge = ` <span style="font-size:10px;background:${filterInfo.color};color:#fff;padding:1px 6px;border-radius:999px;margin-left:6px;">${filterInfo.count} ${filterInfo.label}${suffix}</span>`;
+            }
+        } else {
+            // No filter active — default to the barangay's overall status.
+            const total   = data ? data.total_active  : 0;
+            const scanCnt = data ? data.ai_scan_count : 0;
+            const isPending = data && data.highlight === 'pending';
+            if (total > 0) {
+                badge = ` <span style="font-size:10px;background:${isPending?'#f97316':'#3b82f6'};color:#fff;padding:1px 6px;border-radius:999px;margin-left:6px;">${total} case${total>1?'s':''}</span>`;
+            } else if (scanCnt > 0) {
+                badge = ` <span style="font-size:10px;background:#8b5cf6;color:#fff;padding:1px 6px;border-radius:999px;margin-left:6px;">${scanCnt} AI scan${scanCnt>1?'s':''}</span>`;
+            }
+        }
+
+        label.innerHTML = name.toUpperCase() + badge;
         label.style.display = 'block';
         label.style.opacity = '1';
     });
@@ -802,9 +912,9 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
         let statusLabel = 'NO REPORTS YET';
         let statusColor = '#16a34a';
         if (data) {
-            if (data.highlight === 'pending')  { statusLabel = 'WAITING FOR REVIEW';         statusColor = '#dc2626'; }
-            if (data.highlight === 'verified') { statusLabel = 'CONFIRMED CASES';            statusColor = '#2563eb'; }
-            if (data.highlight === 'mixed')    { statusLabel = 'SOME WAITING, SOME CONFIRMED'; statusColor = '#d97706'; }
+            if (data.highlight === 'pending')  { statusLabel = 'PENDING';         statusColor = '#f97316'; }
+            if (data.highlight === 'verified') { statusLabel = 'CONFIRMED CASES'; statusColor = '#3b82f6'; }
+            if (data.highlight === 'none' && data.ai_scan_count > 0) { statusLabel = 'AI SCAN'; statusColor = '#8b5cf6'; }
         }
         const statusPill = `<span style="display:inline-flex;align-items:center;gap:5px;background:${statusColor}17;color:${statusColor};font-size:9px;font-weight:900;padding:3px 10px;border-radius:999px;letter-spacing:0.1em;white-space:nowrap;">
             <span style="width:6px;height:6px;border-radius:999px;background:${statusColor};flex-shrink:0;"></span>${statusLabel}
@@ -815,22 +925,31 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
         const totalActive   = data ? data.total_active   : 0;
 
         const resolvedCount = data ? data.resolved_count : 0;
+        const aiScanCount   = data ? data.ai_scan_count  : 0;
 
         // ── State for this popup instance: the card list re-renders client-side as the
-        // person types a search, picks a date, or switches status tabs — no reload needed. ──
+        // person types a search, picks a date, or switches status tabs — no reload needed.
+        // If a map filter card (Pending / Verified / AI Scans) is currently active, open the
+        // popup straight into that tab instead of All, so the click goes right to the
+        // filtered data. "Active Reports" spans two tabs (pending+verified) so it still opens on All. ──
+        const filterTabMap  = { pending: 'pending', verified: 'verified', ai_scan: 'ai_scan' };
+        const initialStatus = filterTabMap[activeFilter] || 'all';
         currentBrgyCases = (data && data.cases) ? data.cases : [];
         currentBrgyName  = brgyName;
-        brgyFilterState  = { status: 'all', search: '', date: '' };
+        brgyFilterState  = { status: initialStatus, search: '', date: '' };
 
-        // ── Status tabs — All / Pending / Verified / Resolved, each with its live count ──
+        // ── Status tabs — All / Pending / Verified / Resolved / AI Scans, each with its live count.
+        // "All" covers manual reports only — AI scans are their own tab since they never
+        // move through the pending/verified/resolved review flow. ──
         const statusTabDefs = [
-            { key: 'all',      label: 'All',      count: currentBrgyCases.length },
+            { key: 'all',      label: 'All',      count: pendingCount + verifiedCount + resolvedCount },
             { key: 'pending',  label: 'Pending',  count: pendingCount },
             { key: 'verified', label: 'Verified', count: verifiedCount },
             { key: 'resolved', label: 'Resolved', count: resolvedCount },
+            { key: 'ai_scan',  label: 'AI Scans', count: aiScanCount },
         ];
         const statusTabsHtml = `<div class="brgy-status-tabs">${statusTabDefs.map(t => `
-            <button type="button" class="brgy-status-tab${t.key === 'all' ? ' active-status-tab' : ''}" data-status="${t.key}" onclick="event.stopPropagation();setBrgyStatusFilter('${t.key}');">
+            <button type="button" class="brgy-status-tab${t.key === initialStatus ? ' active-status-tab' : ''}" data-status="${t.key}" onclick="event.stopPropagation();setBrgyStatusFilter('${t.key}');">
                 ${t.label}<span class="brgy-status-tab-count">&nbsp;${t.count}</span>
             </button>`).join('')}</div>`;
 
@@ -869,8 +988,8 @@ document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
             <!-- Scrollable list of report cards -->
             <div id="brgy-report-list" class="brgy-report-list"></div>
 
-            <!-- Footer buttons -->
-            <div style="display:flex;gap:10px;margin-top:14px;flex-shrink:0;">
+            <!-- Footer buttons (pinned to the bottom of the fixed-size popup) -->
+            <div class="brgy-popup-footer" style="display:flex;gap:10px;margin-top:14px;flex-shrink:0;">
                 ${data && data.total_all > 0 ? `
                 <a href="reports.php?barangay_id=${match.id}"
                    style="flex:1;display:flex;align-items:center;justify-content:center;gap:8px;background:#0f172a;color:#fff;font-size:0.76rem;font-weight:800;padding:12px;border-radius:12px;text-decoration:none;letter-spacing:0.04em;"
@@ -915,19 +1034,28 @@ function onBrgyDateInput(val) {
 
 // ── Build a single report card, matching the reference design's card layout ──
 function buildBrgyReportCard(c) {
+    const isAiScan   = !!c.is_ai_scan;
     const isPending  = c.status === 'pending';
     const isResolved = c.status === 'resolved';
 
-    const iconColor = isPending ? '#dc2626' : (isResolved ? '#16a34a' : '#2563eb');
-    const iconSvg   = isPending
+    const iconColor = isAiScan ? '#8b5cf6' : (isPending ? '#f97316' : (isResolved ? '#16a34a' : '#3b82f6'));
+    const iconSvg   = isAiScan
+        ? `<svg fill="none" viewBox="0 0 24 24" stroke="${iconColor}" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2M12 8v8m-4-4h8"/></svg>`
+        : isPending
         ? `<svg fill="none" viewBox="0 0 24 24" stroke="${iconColor}" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`
         : `<svg fill="none" viewBox="0 0 24 24" stroke="${iconColor}" stroke-width="2.6"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>`;
 
-    // Status badge(s) — a resolved case also shows the "Verified" badge it passed through on its way there.
+    // Status badge — just the current status, not the full history (e.g. a resolved
+    // case shows only "Resolved", not "Verified" + "Resolved").
+    // AI-scanned cases skip the review-pipeline badges entirely since they never need review.
     const badgeDefs = [];
-    if (isPending)       badgeDefs.push({ text: 'Waiting for Review', color: '#dc2626', bg: 'rgba(220,38,38,0.1)' });
-    if (!isPending)       badgeDefs.push({ text: 'Verified', color: '#2563eb', bg: 'rgba(37,99,235,0.1)' });
-    if (isResolved)      badgeDefs.push({ text: 'Resolved', color: '#16a34a', bg: 'rgba(22,163,74,0.1)' });
+    if (isAiScan) {
+        badgeDefs.push({ text: 'AI Scanned', color: '#8b5cf6', bg: 'rgba(139,92,246,0.1)' });
+    } else {
+        if (isPending)       badgeDefs.push({ text: 'Waiting for Review', color: '#f97316', bg: 'rgba(249,115,22,0.1)' });
+        else if (isResolved) badgeDefs.push({ text: 'Resolved', color: '#16a34a', bg: 'rgba(22,163,74,0.1)' });
+        else                 badgeDefs.push({ text: 'Verified', color: '#3b82f6', bg: 'rgba(59,130,246,0.1)' });
+    }
     const badgesHtml = badgeDefs.map(b => `<span style="background:${b.bg};color:${b.color};font-size:9px;font-weight:800;padding:3px 9px;border-radius:999px;white-space:nowrap;">${b.text}</span>`).join('');
 
     // Infection rate — falls back to plants_affected / total_plants when the percentage wasn't recorded directly.
@@ -938,6 +1066,11 @@ function buildBrgyReportCard(c) {
         infectionRate = (parseFloat(c.plants_affected) / parseFloat(c.total_plants)) * 100;
     }
     const rateText = (infectionRate !== null && !isNaN(infectionRate)) ? `${infectionRate.toFixed(1)}% infection rate` : 'No infection data';
+
+    // AI scans carry their result as a parsed label + confidence rather than a disease_id / infection rate.
+    const diseaseLine = isAiScan
+        ? `AI Detected: ${c.ai_label || 'Unclassified'}${c.ai_confidence ? ' &bull; ' + c.ai_confidence + ' confidence' : ''}`
+        : `Reported Disease: ${c.disease_name || 'Unidentified'} &bull; ${rateText}`;
 
     const reportId = 'PH-' + (c.reference_id || c.case_id);
 
@@ -952,7 +1085,7 @@ function buildBrgyReportCard(c) {
                 </div>
                 <div style="display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0;">${badgesHtml}</div>
             </div>
-            <p style="color:#64748b;font-size:0.76rem;margin:2px 0;">Reported Disease: ${c.disease_name || 'Unidentified'} &bull; ${rateText}</p>
+            <p style="color:#64748b;font-size:0.76rem;margin:2px 0;">${diseaseLine}</p>
             <p style="color:#64748b;font-size:0.76rem;margin:2px 0;">Barangay: ${currentBrgyName}</p>
             <p style="color:#94a3b8;font-size:0.7rem;margin:2px 0 8px;">Logged${c.report_date ? ' &bull; ' + c.report_date : ''}</p>
             <a href="reports.php?case_id=${c.case_id}&ref=${c.reference_id}"
@@ -972,10 +1105,15 @@ function renderBrgyReportList() {
     const { status, search, date } = brgyFilterState;
 
     const filtered = currentBrgyCases.filter(c => {
-        if (status !== 'all' && c.status !== status) return false;
+        if (status === 'ai_scan') {
+            if (!c.is_ai_scan) return false;
+        } else {
+            if (c.is_ai_scan) return false;
+            if (status !== 'all' && c.status !== status) return false;
+        }
 
         if (search) {
-            const haystack = [c.farmer_name, c.reference_id, c.case_id, c.disease_name]
+            const haystack = [c.farmer_name, c.reference_id, c.case_id, c.disease_name, c.ai_label]
                 .filter(Boolean).join(' ').toLowerCase();
             if (!haystack.includes(search)) return false;
         }

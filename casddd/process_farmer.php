@@ -66,6 +66,16 @@ if ($__dbConfigPath === null) {
 require_once $__dbConfigPath;
 unset($__sessionGuardPath, $__dbConfigPath);
 
+// db_config.php (just included, via a dynamic path) defines $conn.
+// intelephense can't trace a require_once on a variable path, so without
+// this line it flags every later use of $conn as "undefined" even though
+// it's genuinely in scope at runtime. The line below is a real statement
+// (not just a comment) so the analyzer registers $conn as defined from
+// here on — it's a no-op at runtime since $conn already holds the mysqli
+// connection object at this point.
+/** @var mysqli $conn */
+$conn = $conn ?? null;
+
 /* ──────────────────────────────────────────────────
    HELPERS
 ────────────────────────────────────────────────── */

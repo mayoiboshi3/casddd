@@ -383,6 +383,13 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
                 <div id="view_remarks_text" style="color:#334155;font-size:0.82rem;line-height:1.6;"></div>
             </div>
 
+            <!-- Personnel Log — which staff member created / verified / rejected this case.
+                 Filled by renderPersonnelLog() from data.personnel (see personnel_log.php). -->
+            <div id="view_personnel_wrap" style="display:none;background:rgba(99,102,241,0.05);border:1px solid rgba(99,102,241,0.18);border-radius:12px;padding:12px 16px;margin-bottom:14px;">
+                <div style="color:#6366f1;font-size:0.6rem;font-weight:900;text-transform:uppercase;letter-spacing:0.15em;margin-bottom:10px;">🧾 Personnel Log</div>
+                <div id="view_personnel_list" style="display:flex;flex-direction:column;gap:10px;"></div>
+            </div>
+
             <!-- Export (verified / resolved only) -->
             <button id="view_export_btn" onclick="exportSingleReport()"
                 style="display:none;width:100%;background:linear-gradient(135deg,#059669,#047857);color:#fff;font-size:0.7rem;font-weight:900;padding:13px;border-radius:10px;border:none;cursor:pointer;text-transform:uppercase;letter-spacing:0.1em;box-shadow:0 8px 20px rgba(5,150,105,0.35);margin-bottom:4px;align-items:center;justify-content:center;gap:8px;">
@@ -689,6 +696,74 @@ const sevStyles = {
     critical: { bg:'#fce7f3', border:'#f9a8d4', color:'#9d174d' },
 };
 
+// ── PERSONNEL LOG — who created / verified / rejected / resolved the open case ──
+// Built with textContent (never innerHTML) so a staff name can't inject markup.
+const PERSONNEL_STYLES = {
+    created:  { label: 'Created',  icon: '+', bg: '#e0e7ff', color: '#3730a3' },
+    verified: { label: 'Verified', icon: '\u2713', bg: '#dbeafe', color: '#1d4ed8' },
+    rejected: { label: 'Rejected', icon: '\u2715', bg: '#fee2e2', color: '#991b1b' },
+    resolved: { label: 'Resolved', icon: '\u2714', bg: '#d1fae5', color: '#065f46' },
+};
+// wrapId / listId are optional: the disease popup uses the defaults, the Farm Reports
+// popup (planting_harvesting.php) passes its own containers so both share this renderer.
+function renderPersonnelLog(entries, wrapId, listId) {
+    const wrap = document.getElementById(wrapId || 'view_personnel_wrap');
+    const list = document.getElementById(listId || 'view_personnel_list');
+    if (!wrap || !list) return;
+    list.innerHTML = '';
+    if (!entries || !entries.length) { wrap.style.display = 'none'; return; }
+
+    entries.forEach(function (e) {
+        const st = PERSONNEL_STYLES[e.action] || PERSONNEL_STYLES.created;
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:flex-start;gap:10px;';
+
+        const badge = document.createElement('div');
+        badge.style.cssText = 'width:26px;height:26px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:0.8rem;font-weight:900;background:' + st.bg + ';color:' + st.color + ';';
+        badge.textContent = st.icon;
+
+        const body = document.createElement('div');
+        body.style.cssText = 'min-width:0;flex:1;';
+
+        const action = document.createElement('div');
+        action.style.cssText = 'color:' + st.color + ';font-size:0.55rem;font-weight:900;text-transform:uppercase;letter-spacing:0.12em;';
+        action.textContent = st.label + (e.action === 'created' && !e.system ? ' (manual entry)' : '');
+
+        const nameLine = document.createElement('div');
+        nameLine.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:1px;';
+        const name = document.createElement('span');
+        if (e.name) {
+            name.style.cssText = 'color:#0f172a;font-size:0.82rem;font-weight:900;';
+            name.textContent = e.name;
+        } else {
+            name.style.cssText = 'color:#94a3b8;font-size:0.78rem;font-weight:700;font-style:italic;';
+            name.textContent = 'Not recorded';
+        }
+        nameLine.appendChild(name);
+        if (e.role) {
+            const role = document.createElement('span');
+            role.style.cssText = 'background:rgba(15,23,42,0.06);color:#475569;font-size:0.52rem;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;padding:2px 7px;border-radius:999px;';
+            role.textContent = e.role;
+            nameLine.appendChild(role);
+        }
+
+        body.appendChild(action);
+        body.appendChild(nameLine);
+        if (e.at) {
+            const when = document.createElement('div');
+            when.style.cssText = 'color:#64748b;font-size:0.65rem;font-weight:700;margin-top:1px;';
+            when.textContent = e.at;
+            body.appendChild(when);
+        }
+
+        row.appendChild(badge);
+        row.appendChild(body);
+        list.appendChild(row);
+    });
+    wrap.style.display = 'block';
+}
+
 function openViewModal(data) {
     window._currentViewData = data; // stash for single-report PDF export
 
@@ -762,6 +837,9 @@ function openViewModal(data) {
     } else {
         remarksWrap.style.display = 'none';
     }
+
+    // Personnel log — who created / verified / rejected this case
+    renderPersonnelLog(data.personnel);
 
     // Conversation thread — every sent recommendation and logged farmer reply, as chat bubbles.
     // Rendered now (into the hidden messenger popup) so it's ready the instant it's opened.
