@@ -150,6 +150,10 @@ $totalPendingCases = 0;
 $pq = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
 if ($pq) { $totalPendingCases = $pq->fetch_assoc()['cnt']; }
 
+// ── LIVE REFRESH: signature of the data as of THIS render. The browser compares it with reports_poll.php ──
+require_once __DIR__ . "/reports_poll.php";
+$casdSig = reports_signature($conn);
+
 $conn->close();
 ?>
 
@@ -1199,3 +1203,87 @@ function closeBrgyLightbox() {
 </script>
 
 <?php include "includes/layout-end.php"; ?>
+
+<!-- ═══ LIVE UPDATE ═══
+     Every 10 s (only while this tab is visible) asks reports_poll.php whether any report changed.
+     Nothing changed -> a tiny reply and nothing else happens. Something changed -> the page's data is re-read
+     in the background and the stat cards, the map colours and (if open) the barangay popup update in place:
+     no reload, the selected card filter and the popup's tab / search / date are kept. -->
+<script>
+(function () {
+    var POLL_URL = <?= json_encode(rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/') . '/reports_poll.php', JSON_UNESCAPED_SLASHES) ?>;
+    var PAGE_URL = location.pathname + location.search;
+    var INTERVAL = 10000;
+    var seen = <?= json_encode($casdSig) ?>;
+    var busy = false;
+
+    function pulse(el) {
+        try { el.animate([{ transform: 'scale(1.3)', color: '#10b981' }, { transform: 'none' }], { duration: 700, easing: 'ease-out' }); } catch (e) {}
+    }
+
+    // If a barangay popup is open, rebuild it from the new data and put the person's tab / search / date back.
+    function refreshOpenPopup() {
+        var ov = document.getElementById('brgy-popup-overlay'), lb = document.getElementById('brgy-photo-lightbox');
+        if (!ov || ov.style.display !== 'block' || (lb && lb.style.display === 'flex')) return;
+        var want = normalizeName(currentBrgyName);
+        var info = mapPathInfo.filter(function (i) { return normalizeName(i.path.id) === want; })[0];
+        if (!info) return;
+        var saved = { status: brgyFilterState.status, search: brgyFilterState.search, date: brgyFilterState.date };
+        var oldList = document.getElementById('brgy-report-list'), top = oldList ? oldList.scrollTop : 0;
+        info.path.dispatchEvent(new MouseEvent('click', { bubbles: true }));          // rebuilds the popup with the fresh data
+        brgyFilterState = saved;
+        var si = document.getElementById('brgy-search-input'); if (si && saved.search) si.value = saved.search;
+        var di = document.getElementById('brgy-date-input');   if (di && saved.date)   di.value = saved.date;
+        setBrgyStatusFilter(saved.status);
+        var newList = document.getElementById('brgy-report-list'); if (newList) newList.scrollTop = top;
+    }
+
+    function applyFresh(html) {
+        var m = html.match(/const barangayData = (.*?);[ \t]*\r?\n/);
+        if (!m) throw new Error('data not found');
+        var fresh = JSON.parse(m[1]);
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+
+        // stat cards (numbers + the little progress bars)
+        var nums = document.querySelectorAll('.dcard-num'), newNums = doc.querySelectorAll('.dcard-num');
+        Array.prototype.forEach.call(nums, function (el, i) {
+            var n = newNums[i];
+            if (n && el.textContent !== n.textContent) { el.textContent = n.textContent; pulse(el); }
+        });
+        var bars = document.querySelectorAll('.dcard-bar > div'), newBars = doc.querySelectorAll('.dcard-bar > div');
+        Array.prototype.forEach.call(bars, function (el, i) { if (newBars[i]) el.style.width = newBars[i].style.width; });
+
+        // map data + colours
+        Object.keys(barangayData).forEach(function (k) { delete barangayData[k]; });
+        Object.assign(barangayData, fresh);
+        mapPathInfo.forEach(function (info) {
+            var mm = findBarangayByPathId(info.path.id);
+            info.data = mm ? mm.data : null;
+            Array.prototype.slice.call(info.path.classList).forEach(function (c) { if (c.indexOf('status-') === 0) info.path.classList.remove(c); });
+            if (info.data && info.data.highlight !== 'none') info.path.classList.add('status-' + info.data.highlight);
+        });
+        if (activeFilter) applyMapFilter(activeFilter);                                 // keep the selected card filter
+        refreshOpenPopup();
+    }
+
+    function check() {
+        if (busy || document.hidden) return;
+        busy = true;
+        fetch(POLL_URL + '?since=' + encodeURIComponent(JSON.stringify(seen)), {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }, cache: 'no-store', credentials: 'same-origin'
+        })
+        .then(function (r) { return r.json(); })                    // an expired session gives a login page, not JSON -> ignored
+        .then(function (data) {
+            if (!data || !data.changed) return;
+            return fetch(PAGE_URL, { cache: 'no-store', credentials: 'same-origin' })
+                .then(function (r) { return r.text(); })
+                .then(function (html) { applyFresh(html); seen = data.sig; });   // only remembered once the refresh worked
+        })
+        .catch(function (err) { console.warn('[dashboard live update]', err); })
+        .finally(function () { busy = false; });
+    }
+
+    setInterval(check, INTERVAL);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
+})();
+</script>

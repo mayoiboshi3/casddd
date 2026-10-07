@@ -7,9 +7,14 @@ require_once __DIR__ . "/src/db_config.php";
 
 // PERFORMANCE: true when the page is being fetched by the in-page filter/tab switcher.
 $isAjax = (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest');
+// PERFORMANCE: on filter/tab requests, skip the page shell (includes/layout.php -> sidebar, header)
+// and everything after the #drPanel block. The login check is NOT skipped: layout.php only does it
+// through src/session_guard.php, which is required directly below. Set to false to go back to the
+// original behaviour.
 $CASD_AJAX_SKIP_LAYOUT = true;
 
 // Folder (relative to this page, or a full URL path) where the AI scan photos are shown from.
+// CHANGE THIS to move the scan photos, e.g. 'uploads/scan_results' or 'scans/images'.
 define('SCAN_PHOTO_DIR', 'corn_api/uploads/scan_results');
 $pageTitle = "Reports"; 
 if ($isAjax && $CASD_AJAX_SKIP_LAYOUT) {
@@ -18,6 +23,8 @@ if ($isAjax && $CASD_AJAX_SKIP_LAYOUT) {
     include "includes/layout.php";
 }
 
+// casd_dialog_assets() prints the dialog CSS + JS once. It also overrides window.alert,
+// so any leftover alert("...") on this page gets the same look.
 function casd_dialog_assets() {
     static $done = false;
     if ($done) return;
@@ -217,6 +224,10 @@ require_once __DIR__ . "/review.php";
 // new_case_report.php / review.php. Handles its own POST logic up top and
 // exposes render_planting_harvesting_section() to draw the section below.
 require_once __DIR__ . "/planting_harvesting.php";
+
+// --- LIVE CHANGE CHECK: signature of the data as of THIS render (the browser compares against it) ---
+require_once __DIR__ . "/reports_poll.php";
+$casdSig = $isAjax ? [] : reports_signature($conn);
 
 // --- ONE-WAY CASE STATUS FLOW: Pending -> Verified -> Resolved ---
 // 'rejected' is only reachable from 'pending' (an early, dead-end exit for
@@ -1064,7 +1075,7 @@ window.casePaginate = function (cfg) {
         <div class="w-12 h-12 flex-shrink-0 rounded-2xl flex items-center justify-center text-2xl <?= $view === 'disease' ? 'bg-white/15' : 'bg-emerald-50' ?>">🌽</div>
         <div class="text-left">
             <p class="font-black text-sm uppercase tracking-wide <?= $view === 'disease' ? 'text-white' : 'text-gray-800' ?>">Disease Reports</p>
-            <p class="text-[11px] font-bold <?= $view === 'disease' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$stats['total'] ?> manual &middot; <?= (int)$stats['pending'] ?> awaiting review</p>
+            <p id="cardDiseaseStat" class="text-[11px] font-bold <?= $view === 'disease' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$stats['total'] ?> manual &middot; <?= (int)$stats['pending'] ?> awaiting review</p>
         </div>
     </a>
     <a href="?view=farm" class="btn-intel flex items-center gap-4 p-6 rounded-[1.75rem] border-2 <?= $view === 'farm' ? 'bg-emerald-600 border-emerald-600 shadow-lg' : 'bg-white border-gray-100 hover:border-emerald-200' ?>">
@@ -1078,7 +1089,7 @@ window.casePaginate = function (cfg) {
         <div class="w-12 h-12 flex-shrink-0 rounded-2xl flex items-center justify-center text-2xl <?= $view === 'scans' ? 'bg-white/15' : 'bg-emerald-50' ?>">&#128247;</div>
         <div class="text-left">
             <p class="font-black text-sm uppercase tracking-wide <?= $view === 'scans' ? 'text-white' : 'text-gray-800' ?>">AI Scans</p>
-            <p class="text-[11px] font-bold <?= $view === 'scans' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$scanStats['total'] ?> scanned &middot; <?= (int)$scanStats['week'] ?> this week</p>
+            <p id="cardScanStat" class="text-[11px] font-bold <?= $view === 'scans' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$scanStats['total'] ?> scanned &middot; <?= (int)$scanStats['week'] ?> this week</p>
         </div>
     </a>
 </div>
@@ -1381,7 +1392,7 @@ window.casePaginate = function (cfg) {
                     $combined['name'] ?? '',
                 ]));
         ?>
-        <div class="dr-row" data-status="<?= htmlspecialchars($row['status']) ?>" style="border-left:3px solid <?= $rowAccent ?>;<?= ($activeTab !== 'all' && $row['status'] !== $activeTab) ? 'display:none' : '' ?>"
+        <div class="dr-row" data-ref="<?= htmlspecialchars(trim((string)($row['reference_id'] ?? '')) !== '' ? $row['reference_id'] : 'c' . $row['case_id']) ?>" data-status="<?= htmlspecialchars($row['status']) ?>" style="border-left:3px solid <?= $rowAccent ?>;<?= ($activeTab !== 'all' && $row['status'] !== $activeTab) ? 'display:none' : '' ?>"
              data-search="<?= htmlspecialchars($rowSearch) ?>"
              onclick="drOpenRow(<?= (int)$rowIdx ?>)">
             <div class="flex items-center gap-3.5 min-w-0">
@@ -1661,7 +1672,7 @@ if ($scan_q) {
                     $sFarmer, (string)($srow['reference_id'] ?? ''), $srow['brgy_name'] ?? '', $sDiseases,
                 ]));
         ?>
-        <div class="dr-row scan-row" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
+        <div class="dr-row scan-row" data-ref="<?= htmlspecialchars(trim((string)($srow['reference_id'] ?? '')) !== '' ? $srow['reference_id'] : 'c' . $srow['case_id']) ?>" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
              style="border-left:3px solid #10b981;<?= $sIsTarget ? 'background:#ecfdf5;' : '' ?>"
              data-search="<?= htmlspecialchars($sSearch) ?>"
              role="button" tabindex="0"
@@ -2058,8 +2069,10 @@ window.addEventListener('DOMContentLoaded', function() {
         // The calendar lives inside the panel, so it was just replaced too — redraw it.
         if (window.drCalendarInit) { window.drCalendarInit(); }
 
-        // New tab/filter results start on page 1.
-        if (window.drRenderPage) { window.drRenderPage(1, false); }
+        // New tab/filter results start on page 1 (a silent background refresh restores search + page instead).
+        var rs = window.__drRestore; window.__drRestore = null;
+        if (rs) { var inp = newPanel.querySelector('#drSearchInput'); if (inp) { inp.value = rs.term || ''; } }
+        if (window.drRenderPage) { window.drRenderPage(rs ? (rs.page || 1) : 1, false); }
 
         // Keep the PDF export button's data in sync with whichever tab is
         // now showing (each panel carries its own rows in a JSON island).
@@ -2152,6 +2165,18 @@ window.addEventListener('DOMContentLoaded', function() {
     window.drOpenRow = function (i) {
         var rows = panelRows(document.getElementById('drTableRowsData'));
         if (rows[i] && typeof openViewModal === 'function') { openViewModal(rows[i]); }
+    };
+
+    // Background refresh used by the live "new reports" check: reloads the current tab/filters in place and
+    // keeps what the person was doing (search text, page number, tab). Returns false if it cannot run now.
+    window.drSilentRefresh = function () {
+        var panel = getPanel();
+        if (!panel || panel.classList.contains('dr-panel-loading')) return false;
+        var inp = panel.querySelector('#drSearchInput');
+        var act = panel.querySelector('.dr-pager-btn.active');
+        window.__drRestore = { term: inp ? inp.value : '', page: act ? parseInt(act.dataset.page, 10) : 1 };
+        loadPanel(window.location.href, false);
+        return true;
     };
 
     window.drLoadPanel = loadPanel;   // used by the calendar to filter by day
@@ -2284,5 +2309,126 @@ window.addEventListener('DOMContentLoaded', function() {
     else { window.drCalendarInit(); }
 })();
 </script>
+
+<?php if (!$isAjax): ?>
+<?php
+// PRERENDER (Chrome / Edge): while the person looks at one view, the browser can get the other two views
+// ready in the background, so clicking a card shows the page instantly. Other browsers ignore this.
+// "moderate" = starts when the pointer rests on a card; change to "eager" to prepare them straight away.
+$casdSpecUrls = [];
+$casdBasePath = strtok($_SERVER['REQUEST_URI'] ?? 'reports.php', '?');
+foreach (['disease', 'farm', 'scans'] as $__v) { if ($__v !== $view) { $casdSpecUrls[] = $casdBasePath . '?view=' . $__v; } }
+?>
+<script type="speculationrules"><?= json_encode(['prerender' => [['urls' => $casdSpecUrls, 'eagerness' => 'moderate']]], JSON_UNESCAPED_SLASHES) ?></script>
+
+<!-- ═══ LIVE NEW-REPORT CHECK ═══
+     Every few seconds (only while this tab is visible) asks reports_poll.php whether anything changed.
+     Nothing changed -> a tiny reply and nothing else happens. Something changed ->
+       - the numbers on the three cards update right away,
+       - Disease Reports: the list refreshes in place (search text, page and tab are kept),
+       - Farm Reports / AI Scans: a small "Refresh" notice appears (so nothing under your hands moves),
+       - a page that was prepared in the background (prerender) and is now stale simply reloads itself. -->
+<script>
+(function () {
+    var VIEW      = <?= json_encode($view) ?>;
+    var POLL_URL  = <?= json_encode(rtrim(dirname($casdBasePath), '/') . '/reports_poll.php', JSON_UNESCAPED_SLASHES) ?>;
+    var INTERVAL  = 10000;                      // ms between checks
+    var seen      = <?= json_encode($casdSig) ?>;
+    var section   = VIEW === 'disease' ? 'disease' : (VIEW === 'scans' ? 'scans' : 'farm');
+    var wasPrerendered = !!document.prerendering;
+    var userTouched = false, busy = false, timer = null, banner = null, ownWriteAt = 0;
+
+    // Remember when THIS person last saved something (accept / reject / send ...), so their own change is not
+    // announced back to them as "new reports".
+    var _fetch = window.fetch;
+    window.fetch = function (input, init) {
+        var p = _fetch.apply(this, arguments);
+        try {
+            if (init && init.method && String(init.method).toUpperCase() === 'POST') {
+                p.then(function () { ownWriteAt = Date.now(); }, function () {});
+            }
+        } catch (e) {}
+        return p;
+    };
+
+    ['pointerdown', 'keydown'].forEach(function (ev) {
+        window.addEventListener(ev, function () { userTouched = true; }, { capture: true, passive: true });
+    });
+
+    function modalOpen() {
+        return !!document.querySelector('#viewModal:not(.hidden), #messageModal:not(.hidden), #scanModal:not(.hidden), #phViewModal:not(.hidden), .casd-overlay');
+    }
+
+    function say(msg, withRefresh) {
+        if (banner && banner.parentNode) banner.parentNode.removeChild(banner);
+        banner = document.createElement('div');
+        banner.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:2147482000;display:flex;align-items:center;gap:12px;' +
+            'background:#064e3b;color:#fff;padding:12px 16px;border-radius:14px;font:700 12px Inter,sans-serif;box-shadow:0 12px 30px -8px rgba(0,0,0,.35)';
+        var span = document.createElement('span'); span.textContent = msg; banner.appendChild(span);
+        if (withRefresh) {
+            var b = document.createElement('button'); b.type = 'button'; b.textContent = 'Refresh';
+            b.style.cssText = 'background:#fbc02d;color:#064e3b;border:0;border-radius:9px;padding:6px 12px;font:900 10px Inter,sans-serif;letter-spacing:.08em;text-transform:uppercase;cursor:pointer';
+            b.onclick = function () { window.location.reload(); };
+            banner.appendChild(b);
+        } else {
+            setTimeout(function () { if (banner && banner.parentNode) banner.parentNode.removeChild(banner); }, 4000);
+        }
+        document.body.appendChild(banner);
+    }
+
+    function applyStats(st) {
+        if (!st) return;
+        var d = document.getElementById('cardDiseaseStat');
+        if (d) d.textContent = st.manual_total + ' manual \u00b7 ' + st.manual_pending + ' awaiting review';
+        var s = document.getElementById('cardScanStat');
+        if (s) s.textContent = st.scan_total + ' scanned \u00b7 ' + st.scan_week + ' this week';
+    }
+
+    function handleCurrent(newSig) {
+        // A page that was prepared in the background is stale and nobody has touched it yet: just reload it.
+        if (wasPrerendered && !userTouched) { window.location.reload(); return; }
+        if (section === 'disease' && window.drSilentRefresh) {
+            if (modalOpen()) return;                       // try again on the next check; don't disturb an open report
+            if (!window.drSilentRefresh()) return;         // a refresh is already running
+            seen[section] = newSig;
+            say('Reports updated');
+            return;
+        }
+        seen[section] = newSig;
+        if (Date.now() - ownWriteAt < 20000) return;       // the change was this person's own save
+        say(section === 'scans' ? 'New AI scans available' : 'New farm reports available', true);
+    }
+
+    function check() {
+        if (busy || document.hidden || document.prerendering) return;
+        busy = true;
+        fetch(POLL_URL + '?since=' + encodeURIComponent(JSON.stringify(seen)), {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }, cache: 'no-store', credentials: 'same-origin'
+        })
+        .then(function (r) { return r.json(); })           // a login page (expired session) is not JSON -> ignored
+        .then(function (data) {
+            if (!data || !data.changed) return;
+            applyStats(data.stats);
+            Object.keys(data.sig).forEach(function (k) {
+                var now = data.sig[k], before = seen[k];
+                if (!now || !before || now === before) { if (now && !before) seen[k] = now; return; }
+                if (k === section) { handleCurrent(now); } else { seen[k] = now; }
+            });
+        })
+        .catch(function () { /* offline / session expired: try again next time */ })
+        .finally(function () { busy = false; });
+    }
+
+    function start() {
+        timer = setInterval(check, INTERVAL);
+        document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
+        if (wasPrerendered) check();                       // first thing after the page is shown
+    }
+
+    if (document.prerendering) { document.addEventListener('prerenderingchange', start, { once: true }); }
+    else { start(); }
+})();
+</script>
+<?php endif; ?>
 
 <?php include "includes/layout-end.php"; ?>

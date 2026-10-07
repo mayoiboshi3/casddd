@@ -37,5 +37,6 @@ if (!isset($pageTitle)) $pageTitle = "Corn Portal";
     <main class="flex-1 flex flex-col overflow-hidden">
 
         <?php include __DIR__ . '/header.php'; ?>
+        <?php include __DIR__ . '/notifications.php'; ?>
 
         <div id="contentBody" class="p-10 overflow-y-auto bg-[#f8fafc] flex-1">
