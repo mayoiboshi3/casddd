@@ -23,6 +23,7 @@ if ($isAjax && $CASD_AJAX_SKIP_LAYOUT) {
     include "includes/layout.php";
 }
 
+// ── STYLED DIALOGS (replaces native alert()) ─────────────────────────────────
 // casd_dialog_assets() prints the dialog CSS + JS once. It also overrides window.alert,
 // so any leftover alert("...") on this page gets the same look.
 function casd_dialog_assets() {
