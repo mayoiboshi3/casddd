@@ -301,7 +301,8 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
                         onmouseover="this.style.background='rgba(245,158,11,0.22)'" onmouseout="this.style.background='rgba(245,158,11,0.14)'">
                         🔎 Choose the Correct Disease
                     </button>
-                    <p style="color:#78716c;font-size:0.58rem;font-weight:700;text-align:center;margin-top:6px;line-height:1.5;">Marked as "Other / Unidentified" — pick the correct disease from the list to confirm this report.</p>
+                    <p id="view_pending_disease_label" style="display:none;color:#047857;font-size:0.68rem;font-weight:900;text-align:center;margin-top:8px;line-height:1.5;"></p>
+                    <p style="color:#78716c;font-size:0.58rem;font-weight:700;text-align:center;margin-top:6px;line-height:1.5;">Marked as "Other / Unidentified" — pick the correct disease from the list, then click <strong>Save Status Update</strong> to save it.</p>
                 </div>
             </div>
 
@@ -443,6 +444,9 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
                      Gray Leaf Spot / Healthy Corn) is read-only and sourced from the database
                      — there is no equivalent editable field for it. -->
                 <input type="hidden" name="severity_override" id="view_severity_hidden" value="">
+                <!-- Disease(s) picked in the "Choose the Correct Disease" popup. Held here (no page
+                     reload, nothing saved) and only written when Save Status Update is confirmed. -->
+                <input type="hidden" name="reassign_disease_ids" id="view_pending_disease_ids" value="">
 
                 <div class="sidebar-save-wrap">
                     <button type="button" id="view_save_status_btn" onclick="reviewShowStatusConfirm()"
@@ -995,6 +999,10 @@ function openViewModal(data) {
     // Must be set AFTER the severity chip block above (severityHiddenInput.value
     // is only finalized there) and AFTER selectStatusPill() was called earlier,
     // which is why this sits here rather than up near the top of the function.
+    // Clear any disease picked for a previously opened case
+    document.getElementById('view_pending_disease_ids').value = '';
+    const _pdl = document.getElementById('view_pending_disease_label');
+    if (_pdl) { _pdl.style.display = 'none'; _pdl.textContent = ''; }
     window._initialStatus   = data.status || 'pending';
     window._initialSeverity = severityHiddenInput.value; // '' when no severity dropdown is shown
     updateSaveButtonState();
@@ -1026,7 +1034,9 @@ const MAX_REASSIGN_DISEASES = 3;
 let _diseasePickerSelected = [];
 
 function openDiseasePicker() {
-    _diseasePickerSelected = [];
+    // Re-open with whatever was already picked (not yet saved) still ticked
+    _diseasePickerSelected = (document.getElementById('view_pending_disease_ids').value || '')
+        .split(',').filter(Boolean).map(Number);
     renderDiseasePickerList();
     document.getElementById('diseasePickerModal').classList.remove('hidden');
 }
@@ -1066,11 +1076,21 @@ function closeDiseasePicker() {
 }
 
 function confirmReassignDisease() {
-    const data = window._currentViewData;
-    if (!data || _diseasePickerSelected.length === 0) return;
-    document.getElementById('view_reassign_case_id').value        = data.case_id;
-    document.getElementById('view_reassign_new_disease_id').value = _diseasePickerSelected.join(',');
-    document.getElementById('view_reassign_form').submit();
+    if (_diseasePickerSelected.length === 0) return;
+    // No form submit / page reload: just remember the pick. It is saved (together with the
+    // severity and status) only when the reviewer clicks "Save Status Update".
+    document.getElementById('view_pending_disease_ids').value = _diseasePickerSelected.join(',');
+    const names = _diseasePickerSelected.map(id => {
+        const d = ALL_DISEASES.find(x => Number(x.disease_id) === Number(id));
+        return d ? d.disease_name : ('#' + id);
+    });
+    const lbl = document.getElementById('view_pending_disease_label');
+    if (lbl) {
+        lbl.textContent = '✓ Selected: ' + names.join(', ') + ' — not saved until you click Save Status Update';
+        lbl.style.display = 'block';
+    }
+    closeDiseasePicker();
+    updateSaveButtonState();
 }
 
 // ── OPEN THE DEDICATED MESSENGER POPUP ──
@@ -1164,7 +1184,7 @@ function updateSaveButtonState() {
     if (!btn) return;
     const statusVal   = document.getElementById('view_status').value;
     const severityVal = document.getElementById('view_severity_hidden').value;
-    const noChange = (statusVal === window._initialStatus) && (severityVal === (window._initialSeverity || ''));
+    const noChange = (statusVal === window._initialStatus) && (severityVal === (window._initialSeverity || '')) && !document.getElementById('view_pending_disease_ids').value;
 
     // Rejecting requires a reason to be typed in first.
     const reasonEl      = document.getElementById('view_rejection_reason');
@@ -1199,13 +1219,14 @@ function reviewShowStatusConfirm() {
     // (e.g. cached back/forward navigation), never open the confirm overlay for
     // a no-op save — status and severity both match what the case already had.
     const severityVal = document.getElementById('view_severity_hidden').value;
-    const noChange = (statusVal === window._initialStatus) && (severityVal === (window._initialSeverity || ''));
+    const noChange = (statusVal === window._initialStatus) && (severityVal === (window._initialSeverity || '')) && !document.getElementById('view_pending_disease_ids').value;
     if (noChange) { return; }
 
     const current = window._currentCaseStatus || 'pending';
     const msgEl   = document.getElementById('confirm_status_msg');
+    const hasDiseasePick = !!document.getElementById('view_pending_disease_ids').value;
     msgEl.textContent = (statusVal === current)
-        ? `Saving remarks — status stays ${STATUS_LABELS[current]}.`
+        ? (hasDiseasePick ? `Saving the selected disease and severity — status stays ${STATUS_LABELS[current]}.` : `Saving remarks — status stays ${STATUS_LABELS[current]}.`)
         : `Move this case from ${STATUS_LABELS[current]} to ${STATUS_LABELS[statusVal]}?`;
 
     const overlay = document.getElementById('reviewConfirmMode');

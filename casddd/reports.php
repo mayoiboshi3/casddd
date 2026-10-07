@@ -240,6 +240,64 @@ $STATUS_FLOW = [
     'rejected' => ['rejected'],
 ];
 
+// ── Shared helper: fill in the real disease(s) for a Pending "Other / Unidentified" report ──
+// Used by "Save Status Update" (update_case) so nothing is written until the reviewer saves.
+// 1st picked disease reuses this row's disease_id; extra picks (2nd, 3rd) are cloned rows that
+// share the same reference_id, so the report stays ONE file. Columns are read via SHOW COLUMNS
+// so cloning keeps working if disease_cases gains new columns.
+// Returns true if something was applied, false if the case was not eligible / nothing valid picked.
+function casd_reassign_unidentified_disease($conn, $case_id, array $rawIds) {
+    $case_id = (int) $case_id;
+    $new_disease_ids = [];
+    foreach ($rawIds as $rawId) {
+        $id = (int) trim((string) $rawId);
+        if ($id > 0 && $id !== 999 && !in_array($id, $new_disease_ids, true)) {
+            $new_disease_ids[] = $id;
+        }
+    }
+    $new_disease_ids = array_slice($new_disease_ids, 0, 3);   // max 3 diseases
+
+    $cur_q   = mysqli_query($conn, "SELECT * FROM disease_cases WHERE case_id = $case_id LIMIT 1");
+    $cur_row = $cur_q ? mysqli_fetch_assoc($cur_q) : null;
+
+    $isEligible = $cur_row
+        && $cur_row['status'] === 'pending'
+        && in_array((int)($cur_row['disease_id'] ?? 0), [0, 999], true)   // 999 = web form "Other", 0/empty = mobile app with no disease
+        && !empty($new_disease_ids);
+    if (!$isEligible) return false;
+
+    // Only accept ids that really exist in the diseases table
+    $idList = implode(',', $new_disease_ids);
+    $okQ = mysqli_query($conn, "SELECT disease_id FROM diseases WHERE disease_id IN ($idList)");
+    $valid = [];
+    if ($okQ) { while ($r = mysqli_fetch_assoc($okQ)) { $valid[] = (int)$r['disease_id']; } }
+    $new_disease_ids = array_values(array_filter($new_disease_ids, fn($i) => in_array($i, $valid, true)));
+    if (empty($new_disease_ids)) return false;
+
+    $first_disease_id = array_shift($new_disease_ids);
+    mysqli_query($conn, "UPDATE disease_cases SET disease_id = $first_disease_id, updated_at = NOW() WHERE case_id = $case_id");
+
+    if (!empty($new_disease_ids)) {
+        $cols_q = mysqli_query($conn, "SHOW COLUMNS FROM disease_cases");
+        $allCols = [];
+        if ($cols_q) { while ($c = mysqli_fetch_assoc($cols_q)) { $allCols[] = $c['Field']; } }
+        $cloneCols = array_filter($allCols, function ($c) { return $c !== 'case_id'; });
+
+        foreach ($new_disease_ids as $extra_disease_id) {
+            $selectParts = [];
+            foreach ($cloneCols as $c) {
+                if ($c === 'disease_id')      { $selectParts[] = (int)$extra_disease_id . " AS `disease_id`"; }
+                elseif ($c === 'updated_at')  { $selectParts[] = "NOW() AS `updated_at`"; }
+                else                          { $selectParts[] = "`$c`"; }
+            }
+            $insertColsSql = implode(',', array_map(function ($c) { return "`$c`"; }, $cloneCols));
+            $selectSql     = implode(',', $selectParts);
+            mysqli_query($conn, "INSERT INTO disease_cases ($insertColsSql) SELECT $selectSql FROM disease_cases WHERE case_id = $case_id");
+        }
+    }
+    return true;
+}
+
 // 2. HANDLE DATABASE UPDATE
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
     $new_status = mysqli_real_escape_string($conn, $_POST['status']);
@@ -275,6 +333,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
 
     if ($cur_status !== null && $reference_id !== null && in_array($new_status, $allowedNext, true)) {
         $ref_esc = mysqli_real_escape_string($conn, $reference_id);
+
+        // Disease chosen in the picker for an Other / Unidentified report. It is only held in
+        // the modal until now — saved here together with the status + severity, so nothing is
+        // written unless "Save Status Update" is confirmed. (Skipped when rejecting.)
+        $pendingDiseaseIds = trim((string) ($_POST['reassign_disease_ids'] ?? ''));
+        if ($pendingDiseaseIds !== '' && $new_status !== 'rejected') {
+            casd_reassign_unidentified_disease($conn, (int) $case_id, explode(',', $pendingDiseaseIds));
+        }
+
         // WHERE reference_id (not case_id) — every disease row under this report
         // is verified / resolved / rejected together, as one unit.
         // Personnel log: record WHO moved the case, but only when the status really changes
@@ -319,60 +386,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
 // The column list is read from the table itself (SHOW COLUMNS) instead of
 // hard-coded, so this keeps working if disease_cases ever gains new columns.
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['reassign_disease'])) {
+    // Legacy standalone endpoint. The review modal no longer posts here (the disease pick is now
+    // saved together with "Save Status Update" via update_case), but it is kept working.
     $case_id = (int) $_POST['case_id_hidden'];
-
-    // new_disease_id arrives as a single int ("5") or a comma list ("5,7,12")
-    // from the picker — up to 3 diseases. Sanitize: ints only, > 0, not 999
-    // (that's the "Other / Unidentified" placeholder itself), de-duplicated,
-    // capped at 3 even if something upstream ever sends more.
-    $rawIds = explode(',', (string) ($_POST['new_disease_id'] ?? ''));
-    $new_disease_ids = [];
-    foreach ($rawIds as $rawId) {
-        $id = (int) trim($rawId);
-        if ($id > 0 && $id !== 999 && !in_array($id, $new_disease_ids, true)) {
-            $new_disease_ids[] = $id;
-        }
-    }
-    $new_disease_ids = array_slice($new_disease_ids, 0, 3);
-
-    $cur_q   = mysqli_query($conn, "SELECT * FROM disease_cases WHERE case_id = $case_id LIMIT 1");
-    $cur_row = $cur_q ? mysqli_fetch_assoc($cur_q) : null;
-
-    $isEligible = $cur_row
-        && $cur_row['status'] === 'pending'
-        && in_array((int)($cur_row['disease_id'] ?? 0), [0, 999], true)   // 999 = web form "Other", 0/empty = mobile app with no disease
-        && !empty($new_disease_ids);
-
-    if ($isEligible) {
-        $first_disease_id = array_shift($new_disease_ids); // reuse this row for pick #1
-        mysqli_query($conn, "UPDATE disease_cases SET disease_id = $first_disease_id, updated_at = NOW() WHERE case_id = $case_id");
-
-        // Any further picks (#2, #3) become their own disease_cases rows,
-        // cloned off the original row so the report stays ONE file (same
-        // reference_id) with several diseases attached to it.
-        if (!empty($new_disease_ids)) {
-            $cols_q = mysqli_query($conn, "SHOW COLUMNS FROM disease_cases");
-            $allCols = [];
-            if ($cols_q) { while ($c = mysqli_fetch_assoc($cols_q)) { $allCols[] = $c['Field']; } }
-            $cloneCols = array_filter($allCols, function ($c) { return $c !== 'case_id'; });
-
-            foreach ($new_disease_ids as $extra_disease_id) {
-                $selectParts = [];
-                foreach ($cloneCols as $c) {
-                    if ($c === 'disease_id') {
-                        $selectParts[] = (int)$extra_disease_id . " AS `disease_id`";
-                    } elseif ($c === 'updated_at') {
-                        $selectParts[] = "NOW() AS `updated_at`";
-                    } else {
-                        $selectParts[] = "`$c`";
-                    }
-                }
-                $insertColsSql = implode(',', array_map(function ($c) { return "`$c`"; }, $cloneCols));
-                $selectSql     = implode(',', $selectParts);
-                mysqli_query($conn, "INSERT INTO disease_cases ($insertColsSql) SELECT $selectSql FROM disease_cases WHERE case_id = $case_id");
-            }
-        }
-
+    if (casd_reassign_unidentified_disease($conn, $case_id, explode(',', (string) ($_POST['new_disease_id'] ?? '')))) {
         echo "<script>window.location='reports.php?view=disease&tab=pending&case_id=" . $case_id . "';</script>";
         exit;
     } else {
