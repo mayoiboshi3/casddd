@@ -5,6 +5,13 @@
 ob_start();
 require_once __DIR__ . "/src/db_config.php"; 
 
+// ── DISPLAY-TIME SETTINGS (must be defined BEFORE the message handlers below run) ──
+// Hours from UTC that times are shown in (8 = Philippine time).
+if (!defined('CASD_DISPLAY_UTC_OFFSET_HOURS')) { define('CASD_DISPLAY_UTC_OFFSET_HOURS', 8); }
+// Timezone the FARMER APP uses when it writes the "created_at" inside a reply (hours from UTC). It is 0 (UTC)
+// today. If you later set Philippine time in the farmer app's own database config too, change this to 8.
+if (!defined('CASD_FARMER_APP_UTC_OFFSET_HOURS')) { define('CASD_FARMER_APP_UTC_OFFSET_HOURS', 0); }
+
 // PERFORMANCE: true when the page is being fetched by the in-page filter/tab switcher.
 $isAjax = (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest');
 // PERFORMANCE: on filter/tab requests, skip the page shell (includes/layout.php -> sidebar, header)
@@ -298,6 +305,43 @@ function casd_reassign_unidentified_disease($conn, $case_id, array $rawIds) {
     return true;
 }
 
+// ── LIVE MESSAGING HELPERS (used by the review popup's chat; no page reloads) ──
+// casd_json_exit(): throw away the buffered page shell and answer with pure JSON.
+function casd_json_exit(array $payload) {
+    while (ob_get_level() > 0) { ob_end_clean(); }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+// casd_case_chat_state(): the full conversation + the few case fields the chat UI mirrors, plus a
+// signature ("sig") so the browser can ask "anything new?" and get a tiny reply when nothing changed.
+function casd_case_chat_state($conn, $case_id) {
+    $case_id = (int) $case_id;
+    $q   = mysqli_query($conn, "SELECT case_id, status, recommendation_text, recommendation_sent, recommendation_sent_at,
+                                       farmer_reply_text, farmer_reply_at, follow_up_date
+                                FROM disease_cases WHERE case_id = $case_id LIMIT 1");
+    $row = $q ? mysqli_fetch_assoc($q) : null;
+    if (!$row) return null;
+    $state = [
+        'case_id'                => $case_id,
+        'status'                 => $row['status'],
+        'messages'               => buildCaseMessages($conn, $row),
+        'follow_up_date'         => $row['follow_up_date'] ?: null,
+        'recommendation_sent'    => (int) $row['recommendation_sent'],
+        'recommendation_sent_at' => casd_ph_time($conn, $row['recommendation_sent_at']),
+    ];
+    $state['sig'] = md5(json_encode($state, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
+    return $state;
+}
+// Polling endpoint: reports.php?msg_poll=1&case_id=N&sig=LAST_SEEN_SIG
+if ($_SERVER["REQUEST_METHOD"] === "GET" && isset($_GET['msg_poll'])) {
+    $state = casd_case_chat_state($conn, (int) ($_GET['case_id'] ?? 0));
+    if (!$state) { casd_json_exit(['ok' => false, 'error' => 'Case not found.']); }
+    if ($state['sig'] === (string) ($_GET['sig'] ?? '')) { casd_json_exit(['ok' => true, 'changed' => false]); }
+    casd_json_exit(['ok' => true, 'changed' => true] + $state);
+}
+
 // 2. HANDLE DATABASE UPDATE
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
     $new_status = mysqli_real_escape_string($conn, $_POST['status']);
@@ -439,6 +483,21 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
     $rec_text        = mysqli_real_escape_string($conn, $_POST['recommendation_text']);
     $tab_return      = mysqli_real_escape_string($conn, $_POST['return_tab'] ?? 'verified');
     $has_rec         = ($_POST['has_recommendation'] ?? '0') === '1';
+    // ajax=1 -> the review popup sent this in the background: answer with JSON instead of reloading the page.
+    $wantsJson       = (($_POST['ajax'] ?? '') === '1');
+    if ($wantsJson && trim((string) ($_POST['recommendation_text'] ?? '')) === '') {
+        casd_json_exit(['ok' => false, 'error' => 'The message is empty.']);
+    }
+    // A Resolved case is read-only: its conversation can be viewed, but nothing more can be sent
+    // (messages, treatment recommendations, or inspection schedule / cancel notices). Enforced here
+    // as well as in the UI so it can't be bypassed.
+    $st_q   = mysqli_query($conn, "SELECT status FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
+    $st_row = $st_q ? mysqli_fetch_assoc($st_q) : null;
+    if ($st_row && $st_row['status'] === 'resolved') {
+        if ($wantsJson) { casd_json_exit(['ok' => false, 'error' => 'This case is resolved — messages can no longer be sent.']); }
+        casd_alert_redirect('warning', 'Case Resolved', 'This case is resolved. The conversation is read-only.', 'reports.php?view=disease&tab=resolved&case_id=' . $case_id);
+        exit;
+    }
 
     // Field Inspection scheduling — review.php's pinned scheduler posts these two
     // hidden fields alongside every recommendation send:
@@ -493,10 +552,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
                 mysqli_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$findingsMsg')");
             }
         }
-        mysqli_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$rec_text')");
+        $msgOk = mysqli_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$rec_text')");
+        if ($wantsJson) {
+            $state = casd_case_chat_state($conn, (int) $case_id);
+            casd_json_exit(($msgOk && $state) ? ['ok' => true] + $state : ['ok' => false, 'error' => 'The message could not be saved.']);
+        }
         echo "<script>window.location='reports.php?view=disease&tab=" . $tab_return . "&case_id=" . $case_id . "&open_msg=1';</script>";
         exit;
     }
+    if ($wantsJson) { casd_json_exit(['ok' => false, 'error' => 'The message could not be saved.']); }
 }
 
 // Helper: combine a case report's per-disease rows (name, description, treatment,
@@ -600,6 +664,38 @@ function fetchCaseMessages($conn, $case_id) {
     return $messages;
 }
 
+// ── PHILIPPINE TIME FOR DISPLAY ──
+// The database server stamps rows (NOW() / CURRENT_TIMESTAMP) in ITS own timezone — UTC here, which is why a
+// message sent at 12:22 PM in the Philippines showed as 04:22. The farmer app's replies are stamped by the same
+// server. These helpers convert such "database time" strings to Asia/Manila (UTC+8) when they are SHOWN.
+// Nothing stored in the database is changed. The database's offset is detected automatically
+// (so it still works if the server timezone is ever changed); set CASD_DISPLAY_UTC_OFFSET_HOURS to use another zone.
+// (CASD_DISPLAY_UTC_OFFSET_HOURS and CASD_FARMER_APP_UTC_OFFSET_HOURS are defined at the top of this file,
+//  because the message handlers further up use these helpers before this point is reached.)
+function casd_db_utc_offset_seconds($conn) {
+    static $off = null;
+    if ($off === null) {
+        $off = 0;
+        $q = mysqli_query($conn, "SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()) AS off_s");
+        if ($q && ($r = mysqli_fetch_assoc($q))) { $off = (int) $r['off_s']; }
+        $off = (int) (round($off / 900) * 900);   // snap to 15 minutes (absorbs the tiny gap between the two clocks)
+    }
+    return $off;
+}
+function casd_ph_time($conn, $str, $srcOffsetSeconds = null) {   // $srcOffsetSeconds: the string's own offset from UTC; null = the database's
+    if ($str === null || $str === '') { return $str; }
+    try {
+        $dt = new DateTime((string) $str, new DateTimeZone('UTC'));
+    } catch (Exception $e) {
+        return $str;   // not a date — leave untouched
+    }
+    $ts = $dt->getTimestamp();
+    // A string with an explicit zone ("...Z", "+08:00") is already an exact moment; a plain
+    // "2026-10-07 04:22:23" is database-local time and must first be taken back to UTC.
+    if (!preg_match('/(Z|[+-]\d{2}:?\d{2})\s*$/i', (string) $str)) { $ts -= ($srcOffsetSeconds === null ? casd_db_utc_offset_seconds($conn) : (int) $srcOffsetSeconds); }
+    return gmdate('Y-m-d H:i:s', $ts + (CASD_DISPLAY_UTC_OFFSET_HOURS * 3600));
+}
+
 // Helper: build the sent-recommendations list for a case row, falling back to the
 // older single recommendation_text column for cases sent before case_messages existed.
 // Also folds in the farmer's reply (disease_cases.farmer_reply_text / farmer_reply_at,
@@ -607,20 +703,52 @@ function fetchCaseMessages($conn, $case_id) {
 // order alongside the staff messages so the thread reads like a real conversation.
 function buildCaseMessages($conn, $row) {
     $messages = fetchCaseMessages($conn, $row['case_id']);
+    // Every message time is converted to Philippine time right here, from the timezone of where it came from.
+    foreach ($messages as &$__m0) { $__m0['created_at'] = casd_ph_time($conn, $__m0['created_at'] ?? null); }
+    unset($__m0);
     if (empty($messages) && !empty($row['recommendation_text'])) {
         $messages[] = [
             'sender'     => 'staff',
             'message'    => $row['recommendation_text'],
-            'created_at' => $row['recommendation_sent_at'] ?? null,
+            'created_at' => casd_ph_time($conn, $row['recommendation_sent_at'] ?? null),
         ];
     }
 
     if (!empty($row['farmer_reply_text'])) {
-        $messages[] = [
-            'sender'     => 'farmer',
-            'message'    => $row['farmer_reply_text'],
-            'created_at' => $row['farmer_reply_at'] ?? null,
-        ];
+        // The farmer app keeps ALL replies in this one column as a JSON list, e.g.
+        //   [{"message":"hello","created_at":"2026-10-07 04:22:23"}, ...]
+        // Show each entry as its own chat bubble with its own time. Older plain-text replies still work.
+        $rawReply = trim((string) $row['farmer_reply_text']);
+        $decoded  = null;
+        if ($rawReply !== '' && ($rawReply[0] === '[' || $rawReply[0] === '{')) {
+            $j = json_decode($rawReply, true);
+            if (is_array($j)) { $decoded = $j; }
+        }
+        if ($decoded !== null) {
+            if (isset($decoded['message'])) { $decoded = [$decoded]; }   // a single {"message":...} object
+            foreach ($decoded as $item) {
+                if (is_array($item)) {
+                    $text = isset($item['message']) ? trim((string) $item['message']) : '';
+                    // The time written inside the reply comes from the farmer app (its own timezone);
+                    // the farmer_reply_at column is a database TIMESTAMP (shown in the database's zone).
+                    $when = !empty($item['created_at'])
+                        ? casd_ph_time($conn, $item['created_at'], CASD_FARMER_APP_UTC_OFFSET_HOURS * 3600)
+                        : casd_ph_time($conn, $row['farmer_reply_at'] ?? null);
+                } else {
+                    $text = trim((string) $item);
+                    $when = casd_ph_time($conn, $row['farmer_reply_at'] ?? null);
+                }
+                if ($text !== '') {
+                    $messages[] = ['sender' => 'farmer', 'message' => $text, 'created_at' => $when];
+                }
+            }
+        } else {
+            $messages[] = [
+                'sender'     => 'farmer',
+                'message'    => $row['farmer_reply_text'],
+                'created_at' => casd_ph_time($conn, $row['farmer_reply_at'] ?? null),
+            ];
+        }
     }
 
     usort($messages, function ($a, $b) {
@@ -1383,7 +1511,7 @@ window.casePaginate = function (cfg) {
                     'prevention_measures'    => $combined['prevention'],
                     'recommendation_sent'    => $row['recommendation_sent']    ?? 0,
                     'recommendation_text'    => $row['recommendation_text']    ?? null,
-                    'recommendation_sent_at' => $row['recommendation_sent_at'] ?? null,
+                    'recommendation_sent_at' => casd_ph_time($conn, $row['recommendation_sent_at'] ?? null),
                     'messages'               => buildCaseMessages($conn, $row),
                     'personnel'              => personnel_log_build($row),
                 ];
@@ -2044,7 +2172,7 @@ window.addEventListener('DOMContentLoaded', function() {
         // back in — renderRecInstructions() would re-match it against the treatment
         // list and silently re-fill the compose box, undoing the "clear on send".
         'recommendation_text'    => (isset($_GET['open_msg']) && $_GET['open_msg'] === '1') ? null : ($autoOpenData['recommendation_text'] ?? null),
-        'recommendation_sent_at' => $autoOpenData['recommendation_sent_at'] ?? null,
+        'recommendation_sent_at' => casd_ph_time($conn, $autoOpenData['recommendation_sent_at'] ?? null),
         'messages'               => $autoOpenData['messages']               ?? [],
         'personnel'              => personnel_log_build($autoOpenData),
     ]) ?>);

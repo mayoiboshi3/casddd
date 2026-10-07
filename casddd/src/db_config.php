@@ -10,6 +10,9 @@ $conn = mysqli_connect($servername, $username, $password, $dbname);
 if (!$conn) {
     die("Connection failed: " . mysqli_connect_error());
 }
+
+// Make NOW() / CURRENT_TIMESTAMP use Philippine time for this connection
+mysqli_query($conn, "SET time_zone = '+08:00'");
 ?>
 <?php
 /**

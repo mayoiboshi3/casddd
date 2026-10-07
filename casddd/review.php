@@ -107,6 +107,8 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
         background:linear-gradient(135deg, rgba(249,115,22,0.24), rgba(194,65,12,0.12));
         border:1.5px solid #f97316; box-shadow:0 0 0 1px rgba(249,115,22,0.18) inset;
     }
+    .chat-bubble.inspection { color:#431407; }                 /* dark text — the staff bubble's white was unreadable on this pale background */
+    .chat-bubble.inspection.cancelled { color:#1e293b; }
     .chat-bubble.inspection .insp-tag {
         display:flex; align-items:center; gap:5px; font-size:0.6rem; font-weight:900;
         text-transform:uppercase; letter-spacing:0.08em; color:#c2410c; margin-bottom:5px;
@@ -156,7 +158,7 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
         background:linear-gradient(135deg, rgba(148,163,184,0.18), rgba(71,85,105,0.1));
         border:1.5px solid #64748b; box-shadow:0 0 0 1px rgba(100,116,139,0.15) inset;
     }
-    .chat-bubble.inspection.cancelled .insp-tag { color:#94a3b8; }
+    .chat-bubble.inspection.cancelled .insp-tag { color:#475569; }
 
     /* Cancel-inspection confirmation — an in-app dialog card (not a native prompt/
        confirm, not a full red alarm screen) that slides over the messenger popup.
@@ -205,6 +207,52 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
     .icc-btn-danger { background:#dc2626; color:#fff; box-shadow:0 6px 16px rgba(220,38,38,0.3); }
     .icc-btn-danger:hover { background:#b91c1c; }
     .icc-btn-danger:disabled { opacity:0.55; cursor:not-allowed; box-shadow:none; }
+
+    /* In-app confirm dialog (appConfirm) — replaces the browser's native confirm() box */
+    .app-confirm-overlay {
+        position:fixed; inset:0; z-index:300; display:flex; align-items:center; justify-content:center;
+        padding:20px; background:rgba(15,23,42,0.6); backdrop-filter:blur(4px); animation:acFade .15s ease;
+    }
+    @keyframes acFade { from { opacity:0; } to { opacity:1; } }
+    .app-confirm-card {
+        width:100%; max-width:390px; background:#ffffff; border:1px solid #e2e8f0; border-radius:20px;
+        box-shadow:0 30px 70px rgba(0,0,0,0.35); padding:22px 22px 18px; animation:reportPopIn .2s ease;
+        font-family:inherit; text-align:left;
+    }
+    .ac-header { display:flex; align-items:center; gap:12px; }
+    .ac-icon {
+        flex-shrink:0; width:42px; height:42px; border-radius:12px; display:flex; align-items:center;
+        justify-content:center; font-size:1.2rem;
+    }
+    .app-confirm-card.tone-orange .ac-icon { background:rgba(249,115,22,0.14); border:1px solid rgba(249,115,22,0.35); }
+    .app-confirm-card.tone-red    .ac-icon { background:rgba(248,113,113,0.14); border:1px solid rgba(248,113,113,0.35); }
+    .app-confirm-card.tone-teal   .ac-icon { background:rgba(13,148,136,0.12); border:1px solid rgba(13,148,136,0.35); }
+    .ac-title { color:#0f172a; font-size:1.02rem; font-weight:900; letter-spacing:-0.01em; margin:0 0 2px; line-height:1.25; }
+    .ac-sub   { color:#94a3b8; font-size:0.62rem; font-weight:800; text-transform:uppercase; letter-spacing:0.08em; margin:0; }
+    .ac-detail {
+        margin-top:16px; padding:13px 15px; border-radius:14px;
+        background:rgba(249,115,22,0.07); border:1px solid rgba(249,115,22,0.28);
+    }
+    .app-confirm-card.tone-red  .ac-detail { background:rgba(248,113,113,0.07); border-color:rgba(248,113,113,0.28); }
+    .app-confirm-card.tone-teal .ac-detail { background:rgba(13,148,136,0.07);  border-color:rgba(13,148,136,0.28); }
+    .ac-detail-main { color:#0f172a; font-size:0.92rem; font-weight:900; line-height:1.35; }
+    .ac-detail-sub  { color:#c2410c; font-size:0.8rem; font-weight:800; margin-top:3px; }
+    .app-confirm-card.tone-red  .ac-detail-sub { color:#b91c1c; }
+    .app-confirm-card.tone-teal .ac-detail-sub { color:#0f766e; }
+    .ac-desc { color:#475569; font-size:0.76rem; line-height:1.55; margin:14px 0 0; }
+    .ac-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }
+    .ac-btn {
+        padding:10px 18px; border-radius:11px; font-weight:800; font-size:0.74rem; cursor:pointer;
+        border:1px solid transparent; transition:all 0.15s ease; font-family:inherit;
+    }
+    .ac-btn-secondary { background:rgba(15,23,42,0.06); border-color:rgba(15,23,42,0.14); color:#334155; }
+    .ac-btn-secondary:hover { background:rgba(15,23,42,0.12); }
+    .ac-btn-primary { color:#fff; border:none; }
+    .app-confirm-card.tone-orange .ac-btn-primary { background:linear-gradient(135deg,#f97316,#c2410c); box-shadow:0 8px 18px rgba(249,115,22,0.35); }
+    .app-confirm-card.tone-red    .ac-btn-primary { background:#dc2626; box-shadow:0 8px 18px rgba(220,38,38,0.3); }
+    .app-confirm-card.tone-teal   .ac-btn-primary { background:linear-gradient(135deg,#0d9488,#0f766e); box-shadow:0 8px 18px rgba(13,148,136,0.3); }
+    .ac-btn-primary:hover { filter:brightness(1.07); }
+    .ac-btn:focus-visible { outline:2px solid #6366f1; outline-offset:2px; }
 
     /* Photo lightbox — view evidence full-size without leaving the case file */
     #photoLightbox { display:none; position:fixed; inset:0; z-index:110; background:rgba(0,0,0,0.88); align-items:center; justify-content:center; cursor:zoom-out; animation:reportPopIn .18s ease; }
@@ -560,7 +608,7 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
         <p id="view_rec_sent_note" style="display:none;color:#475569;font-size:0.64rem;font-weight:700;text-align:center;padding:0 20px 10px;flex-shrink:0;"></p>
 
         <!-- Suggested replies (from the diseases table's recommended_treatment) — the "+" section, now below the pinned schedule -->
-        <div style="flex-shrink:0;border-top:1px solid rgba(15,23,42,0.06);padding:14px 20px 0;">
+        <div id="msg_suggested_wrap" style="flex-shrink:0;border-top:1px solid rgba(15,23,42,0.06);padding:14px 20px 0;">
             <button type="button" onclick="toggleSuggested()" id="msg_suggested_toggle" style="background:rgba(165,180,252,0.08);border:1px solid rgba(165,180,252,0.2);color:#4338ca;font-size:0.66rem;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;cursor:pointer;padding:8px 12px;border-radius:10px;margin:0 0 10px;display:flex;align-items:center;gap:6px;width:100%;justify-content:space-between;">
                 <span>💊 Suggested treatment replies</span> <span style="font-size:0.75rem;">▾</span>
             </button>
@@ -570,7 +618,7 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
         </div>
 
         <!-- Messenger-style bottom input bar -->
-        <div style="flex-shrink:0;display:flex;align-items:flex-end;gap:10px;padding:14px 20px 18px;background:rgba(15,23,42,0.02);border-top:1px solid rgba(15,23,42,0.06);">
+        <div id="msg_compose_bar" style="flex-shrink:0;display:flex;align-items:flex-end;gap:10px;padding:14px 20px 18px;background:rgba(15,23,42,0.02);border-top:1px solid rgba(15,23,42,0.06);">
             <textarea id="view_rec_text" rows="1" oninput="autoGrowMsgBox(this);updateRecSendState()"
                 style="flex:1;resize:none;max-height:130px;padding:12px 16px;border-radius:22px;background:rgba(15,23,42,0.07);border:1px solid rgba(15,23,42,0.14);color:#1e293b;font-size:0.86rem;line-height:1.45;outline:none;box-sizing:border-box;font-family:inherit;"
                 placeholder="Type a message or pick a suggested reply…"></textarea>
@@ -585,7 +633,8 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
                 ➤
             </button>
         </div>
-        <p style="flex-shrink:0;color:#334155;font-size:0.6rem;font-weight:600;text-align:center;padding:0 20px 12px;line-height:1.4;">Sends this recommendation straight to the farmer's case file.</p>
+        <p id="msg_readonly_note" style="display:none;flex-shrink:0;margin:0;padding:14px 20px 16px;background:rgba(15,23,42,0.04);border-top:1px solid rgba(15,23,42,0.08);color:#475569;font-size:0.7rem;font-weight:800;text-align:center;line-height:1.5;">🔒 This case is resolved — the conversation is read-only.</p>
+        <p id="msg_compose_hint" style="flex-shrink:0;color:#334155;font-size:0.6rem;font-weight:600;text-align:center;padding:0 20px 12px;line-height:1.4;">Sends this recommendation straight to the farmer's case file.</p>
 
         <!-- ═══ CANCEL-INSPECTION CONFIRMATION ═══
              An in-app dialog card (not a native prompt/confirm) that slides over the
@@ -847,6 +896,7 @@ function openViewModal(data) {
 
     // Conversation thread — every sent recommendation and logged farmer reply, as chat bubbles.
     // Rendered now (into the hidden messenger popup) so it's ready the instant it's opened.
+    applyChatReadOnly(data.status === 'resolved');
     renderChatThread(data.messages || []);
 
     // Preview card — last message snippet + badge, shown on the case file itself
@@ -898,6 +948,8 @@ function openViewModal(data) {
         nextWrap.style.display   = 'none';
         inspToggle.style.display = 'flex';
     }
+
+    applyChatReadOnly(data.status === 'resolved');   // re-apply: the scheduler block above just reset its visibility
 
     // Photo evidence — photo_evidence may hold multiple comma-separated filenames
     const photoWrap   = document.getElementById('view_photo_wrap');
@@ -1118,6 +1170,7 @@ function openMessageModal() {
     closeCancelInspectionOverlay();
 
     document.getElementById('messageModal').classList.remove('hidden');
+    pollCaseMessages();   // pick up any new farmer reply right away
     const box = document.getElementById('messageModalBox');
     box.style.animation = 'none';
     box.offsetHeight;
@@ -1424,12 +1477,18 @@ function updateRecSendState() {
 
 // Discards whatever is currently typed/selected in the compose box — clears the
 // textarea and deselects any picked treatment instructions, without sending anything.
-function cancelRecommendationCompose() {
+async function cancelRecommendationCompose() {
     const box = document.getElementById('view_rec_text');
     const hasDraft = box.value.trim().length > 0 || (window._recSelected && window._recSelected.size > 0);
     if (!hasDraft) return;
 
-    if (!confirm('Discard this message? It will not be sent to the farmer.')) return;
+    const ok = await appConfirm({
+        icon: '🗑️', tone: 'red',
+        title: 'Discard this message?',
+        message: 'It will not be sent to the farmer.',
+        confirmText: 'Discard', cancelText: 'Keep editing'
+    });
+    if (!ok) return;
 
     box.value = '';
     autoGrowMsgBox(box);
@@ -1514,7 +1573,7 @@ function renderChatThread(messages) {
         //   flow, so it actually clears follow_up_date and posts a cancellation notice —
         //   not just a cosmetic delete of this bubble. Older inspection bubbles (already
         //   cancelled, or superseded by a later reschedule) never get this button.
-        if (!isFarmer && !isCancelled && isActiveInspection) {
+        if (!isFarmer && !isCancelled && isActiveInspection && !window._chatReadOnly) {
             const cancelBtn = document.createElement('button');
             cancelBtn.type = 'button';
             cancelBtn.className = 'msg-cancel-btn inspection-variant';
@@ -1529,8 +1588,225 @@ function renderChatThread(messages) {
     thread.scrollTop = thread.scrollHeight;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LIVE MESSAGING — no page reloads
+//  • Sending (message / schedule inspection / cancel inspection) is a background request.
+//    The bubble appears instantly as "Sending…" and flips to "Sent" when the server confirms.
+//  • While a case file is open, the thread is checked every few seconds for farmer replies
+//    (and anything sent from another screen). The compose box is never touched by this.
+// ═══════════════════════════════════════════════════════════════════════════
+// ── READ-ONLY CONVERSATION — a Resolved case can be read, but nothing more can be sent ──
+function applyChatReadOnly(readOnly) {
+    window._chatReadOnly = !!readOnly;
+    const setDisplay = (id, on, disp) => { const el = document.getElementById(id); if (el) el.style.display = on ? disp : 'none'; };
+    setDisplay('msg_suggested_wrap', !readOnly, 'block');   // suggested treatment replies
+    setDisplay('msg_compose_bar',    !readOnly, 'flex');    // text box + send / discard buttons
+    setDisplay('msg_compose_hint',   !readOnly, 'block');
+    setDisplay('msg_readonly_note',   readOnly, 'block');
+    if (readOnly) setDisplay('view_inspection_section', false, 'block');   // no schedule / adjust / cancel inspection
+}
+
+const MSG_POLL_INTERVAL_MS = 3000;
+let _pendingBubbles = [];
+let _pendingBubbleId = 0;
+window._recChain = Promise.resolve();
+window._msgSig = '';
+window._msgSigCase = '';
+
+function postRecAjax(fields) {
+    const body = new URLSearchParams();
+    body.set('send_recommendation', '1');
+    body.set('ajax', '1');
+    Object.keys(fields).forEach(k => body.set(k, fields[k]));
+    return fetch(window.location.href.split('#')[0], {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: body.toString(),
+        credentials: 'same-origin',
+        cache: 'no-store'
+    })
+    .then(r => r.text())
+    .then(txt => {
+        let d = null;
+        try { d = JSON.parse(txt); }
+        catch (e) {
+            // Not JSON: a PHP error (blank/500 page) or an expired login page.
+            console.error('Unexpected reply from the server:', txt);
+            throw new Error('The server sent an unexpected reply. Please reload the page and try again — if it keeps happening, check the PHP error log.');
+        }
+        if (!d || !d.ok) throw new Error((d && d.error) || 'The message could not be sent.');
+        return d;
+    });
+}
+
+// Sends are queued so messages always arrive in the order they were typed.
+function queueRecSend(payload, opts) {
+    opts = opts || {};
+    const run = () => postRecAjax(payload).then(d => {
+        if (opts.entry) _pendingBubbles = _pendingBubbles.filter(e => e !== opts.entry);
+        applyCaseMessageState(d, false);
+        return d;
+    });
+    const p = window._recChain.then(run);
+    window._recChain = p.catch(() => {});
+    return p;
+}
+
+function refreshChatThread(messages) {
+    const thread = document.getElementById('view_chat_thread');
+    const nearBottom = (thread.scrollHeight - thread.scrollTop - thread.clientHeight) < 80;
+    const prevTop = thread.scrollTop;
+    renderChatThread(messages);       // rebuilds the bubbles (and scrolls to the bottom)
+    renderPendingBubbles(false);      // keep "Sending…" / "Not sent" bubbles visible
+    thread.scrollTop = nearBottom ? thread.scrollHeight : prevTop;   // don't yank the view if reading older messages
+}
+
+function renderPendingBubbles(scrollToEnd) {
+    const thread = document.getElementById('view_chat_thread');
+    if (!thread) return;
+    thread.querySelectorAll('.chat-row.pending').forEach(n => n.remove());
+    const data = window._currentViewData;
+    const cid = data ? String(data.case_id) : null;
+    const mine = _pendingBubbles.filter(e => e.case_id === cid);
+    if (mine.length) document.getElementById('view_chat_empty').style.display = 'none';
+    mine.forEach(entry => {
+        const row = document.createElement('div');
+        row.className = 'chat-row staff pending';
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-bubble staff';
+        bubble.textContent = entry.text;
+        if (entry.state === 'sending') bubble.style.opacity = '0.7';
+        const meta = document.createElement('div');
+        meta.className = 'chat-meta';
+        if (entry.state === 'failed') {
+            meta.textContent = 'Not sent · Tap to retry';
+            meta.style.color = '#dc2626';
+            meta.style.cursor = 'pointer';
+            row.onclick = () => retryPendingBubble(entry);
+        } else {
+            meta.textContent = 'Sending…';
+        }
+        row.appendChild(bubble);
+        row.appendChild(meta);
+        thread.appendChild(row);
+    });
+    if (scrollToEnd) thread.scrollTop = thread.scrollHeight;
+}
+
+function retryPendingBubble(entry) {
+    if (entry.state !== 'failed' || window._chatReadOnly) return;
+    entry.state = 'sending';
+    renderPendingBubbles(false);
+    queueRecSend(entry.payload, { entry }).catch(() => { entry.state = 'failed'; renderPendingBubbles(false); });
+}
+
+function updateChatPreview(msgs) {
+    const previewEl = document.getElementById('view_chat_preview_text');
+    if (!previewEl) return;
+    if (msgs.length > 0) {
+        const last = msgs[msgs.length - 1];
+        const text = last.message.length > 60 ? last.message.slice(0, 60) + '…' : last.message;
+        previewEl.innerText = (last.sender === 'farmer' ? 'Farmer: ' : 'Sent: ') + text;
+    } else {
+        previewEl.innerText = 'No recommendation sent yet — tap to send one.';
+    }
+}
+
+function applySentState(sent, sentAt) {
+    const badge = document.getElementById('view_rec_sent_badge');
+    const note  = document.getElementById('view_rec_sent_note');
+    const hdr   = document.getElementById('msg_header_badge');
+    window._recAlreadySent = (sent == 1);
+    if (window._recAlreadySent) {
+        badge.style.display = 'inline-block';
+        note.style.display  = 'block';
+        note.innerText      = sentAt ? `Last sent: ${sentAt}` : 'Already sent to the farmer.';
+        hdr.style.display   = 'inline-block';
+    } else {
+        badge.style.display = 'none';
+        note.style.display  = 'none';
+        hdr.style.display   = 'none';
+    }
+}
+
+// Re-draws the pinned "Next inspection" chip / schedule picker after a schedule, reschedule or cancel.
+function refreshInspectionUi(followUpDate) {
+    window._currentFollowUpDate = followUpDate || null;
+    window._inspectionEditMode = false;
+    document.getElementById('view_rec_clear_followup').value = '0';
+    document.getElementById('view_inspection_panel').style.display = 'none';
+    const toggle = document.getElementById('msg_inspection_toggle');
+    toggle.innerHTML = 'Schedule field inspection <span style="font-size:0.75rem;">▾</span>';
+    document.getElementById('view_inspection_date').value = '';
+    document.getElementById('view_inspection_time').value = '';
+    const btn = document.getElementById('view_inspection_confirm_btn');
+    btn.disabled = true;
+    btn.textContent = 'Schedule & Notify Farmer';
+    const nextWrap = document.getElementById('view_inspection_next_wrap');
+    if (followUpDate) {
+        document.getElementById('view_inspection_next_text').innerText = followUpDate;
+        nextWrap.style.display = 'flex';
+        toggle.style.display   = 'none';
+    } else {
+        nextWrap.style.display = 'none';
+        toggle.style.display   = 'flex';
+    }
+}
+
+// Applies a server snapshot (reply to a send, or a poll result) to the open case file.
+function applyCaseMessageState(d, fromPoll) {
+    const data = window._currentViewData;
+    if (!data || String(data.case_id) !== String(d.case_id)) return;   // user moved to another case meanwhile
+    const prevFarmerCount = (data.messages || []).filter(m => m.sender === 'farmer').length;
+
+    // Update the shared case object too, so re-opening this case from the list shows current data.
+    data.messages               = d.messages || [];
+    data.follow_up_date         = d.follow_up_date;
+    data.recommendation_sent    = d.recommendation_sent;
+    data.recommendation_sent_at = d.recommendation_sent_at;
+    window._msgSigCase = String(d.case_id);
+    window._msgSig     = d.sig;
+
+    if (d.status === 'resolved' && !window._chatReadOnly) { _pendingBubbles = _pendingBubbles.filter(e => e.case_id !== String(d.case_id)); applyChatReadOnly(true); }
+    refreshChatThread(data.messages);
+    updateChatPreview(data.messages);
+    applySentState(d.recommendation_sent, d.recommendation_sent_at);
+    if (String(d.follow_up_date || '') !== String(window._currentFollowUpDate || '')) {
+        refreshInspectionUi(d.follow_up_date);
+    }
+
+    if (fromPoll) {
+        const nowFarmerCount = data.messages.filter(m => m.sender === 'farmer').length;
+        const messengerHidden = document.getElementById('messageModal').classList.contains('hidden');
+        if (nowFarmerCount > prevFarmerCount && messengerHidden) {
+            showAppToast('💬 New reply from ' + (data.farmer_name || 'the farmer'));
+        }
+    }
+}
+
+// Background check for new messages — only while a case file is open and the tab is visible.
+let _msgPollBusy = false;
+function pollCaseMessages() {
+    if (_msgPollBusy || document.hidden) return;
+    const vm = document.getElementById('viewModal');
+    const data = window._currentViewData;
+    if (!vm || vm.classList.contains('hidden') || !data || !data.case_id) return;
+    const caseId = String(data.case_id);
+    const sig = (window._msgSigCase === caseId) ? window._msgSig : '';
+    _msgPollBusy = true;
+    fetch(window.location.pathname + '?msg_poll=1&case_id=' + encodeURIComponent(caseId) + '&sig=' + encodeURIComponent(sig), {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }, cache: 'no-store', credentials: 'same-origin'
+    })
+    .then(r => r.json())
+    .then(d => { if (d && d.ok && d.changed) applyCaseMessageState(d, true); })
+    .catch(() => {})
+    .finally(() => { _msgPollBusy = false; });
+}
+if (!window._msgPollTimer) { window._msgPollTimer = setInterval(pollCaseMessages, MSG_POLL_INTERVAL_MS); }
+
 // ── SEND DISEASE RECOMMENDATION TO THE FARMER ──
 function sendRecommendation() {
+    if (window._chatReadOnly) { showAppToast('This case is resolved — messages can no longer be sent.', 'error'); return; }
     const text = document.getElementById('view_rec_text').value.trim();
     if (!text) { alert('There is no recommendation text to send.'); return; }
 
@@ -1553,18 +1829,18 @@ function sendRecommendation() {
         return;
     }
 
-    if (!confirm('Send this recommendation to the farmer?')) return;
+    // Messaging-app behaviour: no confirm dialog, no reload. The bubble shows instantly as
+    // "Sending…" and turns into "Sent" once the server confirms.
+    const payload = {
+        case_id_hidden:       document.getElementById('view_case_id_hidden').value,
+        recommendation_text:  text,
+        return_tab:           status || 'verified',
+        has_recommendation:   hasRecommendation ? '1' : '0',
+        follow_up_date:       '',      // plain sends never touch the inspection date
+        clear_follow_up_date: '0'
+    };
 
-    document.getElementById('view_rec_case_id').value     = document.getElementById('view_case_id_hidden').value;
-    document.getElementById('view_rec_hidden_text').value = text;
-    document.getElementById('view_rec_return_tab').value  = status || 'verified';
-    document.getElementById('view_rec_has_recommendation').value = hasRecommendation ? '1' : '0';
-    document.getElementById('view_rec_followup_date').value = ''; // plain sends never touch the inspection date
-    document.getElementById('view_rec_clear_followup').value = '0';
-    document.getElementById('view_rec_form').submit();
-
-    // Clear the compose box + reset picked instructions once the send is dispatched,
-    // so the field doesn't sit there holding stale text if the modal stays open.
+    // Clear the compose box + reset picked instructions straight away, like a chat app.
     document.getElementById('view_rec_text').value = '';
     window._recSelected = new Set();
     document.querySelectorAll('#view_rec_instructions .rec-instruction-btn.selected').forEach(btn => {
@@ -1574,6 +1850,67 @@ function sendRecommendation() {
     });
     autoGrowMsgBox(document.getElementById('view_rec_text'));
     updateRecSendState();
+
+    const entry = { id: ++_pendingBubbleId, case_id: String(payload.case_id_hidden), text: text, payload: payload, state: 'sending' };
+    _pendingBubbles.push(entry);
+    renderPendingBubbles(true);
+
+    queueRecSend(payload, { entry }).catch(err => {
+        entry.state = 'failed';
+        renderPendingBubbles(true);
+        showAppToast((err && err.message) ? err.message : 'The message could not be sent.', 'error');
+    });
+}
+
+// ── IN-APP CONFIRM DIALOG ──
+// Promise-based replacement for window.confirm(): await appConfirm({...}) -> true / false.
+// opts: title, subtitle, detail (big line), detailSub (second line), message, icon,
+//       confirmText, cancelText, tone ('orange' | 'red' | 'teal').
+function appConfirm(opts) {
+    opts = opts || {};
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.className = 'app-confirm-overlay';
+        overlay.innerHTML =
+            '<div class="app-confirm-card tone-' + (opts.tone || 'orange') + '" role="dialog" aria-modal="true">' +
+              '<div class="ac-header"><div class="ac-icon"></div><div style="min-width:0;"><p class="ac-title"></p><p class="ac-sub"></p></div></div>' +
+              '<div class="ac-detail" style="display:none;"><div class="ac-detail-main"></div><div class="ac-detail-sub"></div></div>' +
+              '<p class="ac-desc"></p>' +
+              '<div class="ac-actions"><button type="button" class="ac-btn ac-btn-secondary"></button><button type="button" class="ac-btn ac-btn-primary"></button></div>' +
+            '</div>';
+        const q = sel => overlay.querySelector(sel);
+        q('.ac-icon').textContent  = opts.icon || '❓';
+        q('.ac-title').textContent = opts.title || 'Are you sure?';
+        q('.ac-sub').textContent   = opts.subtitle || '';
+        q('.ac-sub').style.display = opts.subtitle ? 'block' : 'none';
+        if (opts.detail) {
+            q('.ac-detail').style.display = 'block';
+            q('.ac-detail-main').textContent = opts.detail;
+            q('.ac-detail-sub').textContent  = opts.detailSub || '';
+            q('.ac-detail-sub').style.display = opts.detailSub ? 'block' : 'none';
+        }
+        q('.ac-desc').textContent  = opts.message || '';
+        q('.ac-desc').style.display = opts.message ? 'block' : 'none';
+        const cancelBtn = q('.ac-btn-secondary'), okBtn = q('.ac-btn-primary');
+        cancelBtn.textContent = opts.cancelText || 'Cancel';
+        okBtn.textContent     = opts.confirmText || 'Confirm';
+
+        function close(result) {
+            document.removeEventListener('keydown', onKey, true);
+            overlay.remove();
+            resolve(result);
+        }
+        function onKey(e) {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(false); }
+        }
+        document.addEventListener('keydown', onKey, true);
+        overlay.addEventListener('click', e => { if (e.target === overlay) close(false); });
+        cancelBtn.onclick = () => close(false);
+        okBtn.onclick     = () => close(true);
+
+        document.body.appendChild(overlay);
+        okBtn.focus();
+    });
 }
 
 // ── FIELD INSPECTION SCHEDULER ──
@@ -1634,6 +1971,7 @@ function openInspectionPanelForEdit() {
 // the in-app confirmation overlay (see confirmCancelInspection() for the part
 // that actually sends the notice and clears the date).
 function cancelFieldInspection() {
+    if (window._chatReadOnly) return;
     if (!window._currentFollowUpDate) return;
     openCancelInspectionOverlay();
 }
@@ -1676,14 +2014,22 @@ function confirmCancelInspection() {
 
     const messageText = `FIELD INSPECTION CANCELLED\nThe field inspection scheduled for your farm on ${niceDate} has been cancelled due to ${reason}. Please wait for further scheduling.`;
 
-    document.getElementById('view_rec_case_id').value            = document.getElementById('view_case_id_hidden').value;
-    document.getElementById('view_rec_hidden_text').value        = messageText;
-    document.getElementById('view_rec_return_tab').value         = window._currentCaseStatus || 'verified';
-    document.getElementById('view_rec_has_recommendation').value = '0';
-    document.getElementById('view_rec_followup_date').value      = '';
-    document.getElementById('view_rec_clear_followup').value     = '1';
-
-    document.getElementById('view_rec_form').submit();
+    queueRecSend({
+        case_id_hidden:       document.getElementById('view_case_id_hidden').value,
+        recommendation_text:  messageText,
+        return_tab:           window._currentCaseStatus || 'verified',
+        has_recommendation:   '0',
+        follow_up_date:       '',
+        clear_follow_up_date: '1'
+    }).then(d => {
+        refreshInspectionUi(d.follow_up_date);
+        closeCancelInspectionOverlay();
+        showAppToast('Inspection cancelled — the farmer was notified.');
+    }).catch(err => {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Confirm Cancellation';
+        showAppToast((err && err.message) ? err.message : 'Could not cancel the inspection.', 'error');
+    });
 }
 
 function updateInspectionBtnState() {
@@ -1694,7 +2040,8 @@ function updateInspectionBtnState() {
     document.getElementById('view_inspection_confirm_btn').disabled = !(date && time) || isPast;
 }
 
-function scheduleFieldInspection() {
+async function scheduleFieldInspection() {
+    if (window._chatReadOnly) { showAppToast('This case is resolved — it can no longer be changed.', 'error'); return; }
     const dateVal = document.getElementById('view_inspection_date').value;
     const timeVal = document.getElementById('view_inspection_time').value;
     if (!dateVal || !timeVal) { showAppToast('Pick both a date and a time first.', 'error'); return; }
@@ -1715,29 +2062,48 @@ function scheduleFieldInspection() {
     const niceTime = dateObj.toLocaleTimeString(undefined, { hour:'numeric', minute:'2-digit' });
     const isEdit   = !!window._inspectionEditMode;
 
-    // Confirmation before anything is sent or saved
-    const confirmed = confirm(
-        (isEdit
-            ? `Reschedule the field inspection to ${niceDate} at ${niceTime}?\n\n`
-            : `Schedule a field inspection for ${niceDate} at ${niceTime}?\n\n`) +
-        `This will be sent to the farmer as a message and saved as this case's follow-up date.`
-    );
+    // Confirmation before anything is sent or saved (in-app dialog, not the browser's confirm box)
+    const confirmed = await appConfirm({
+        icon: '📅',
+        tone: 'orange',
+        title: isEdit ? 'Reschedule field inspection?' : 'Schedule field inspection?',
+        subtitle: 'Farmer will be notified',
+        detail: niceDate,
+        detailSub: 'at ' + niceTime,
+        message: 'This will be sent to the farmer as a message and saved as this case\'s follow-up date.',
+        confirmText: isEdit ? 'Reschedule & Notify' : 'Schedule & Notify',
+        cancelText: 'Cancel'
+    });
     if (!confirmed) return;
 
     const messageText = (isEdit
         ? `FIELD INSPECTION RESCHEDULED\nThe field inspection for your farm has been moved to ${niceDate} at ${niceTime}. Please be available on-site at that time.`
         : `FIELD INSPECTION SCHEDULED\nA field inspection has been scheduled for your farm on ${niceDate} at ${niceTime}. Please be available on-site at that time.`);
 
-    // Reuse the existing recommendation-send pipeline: it posts a staff bubble
-    // into the chat thread and, via the follow_up_date hidden field, saves the
-    // inspection date on the case record (disease_cases.follow_up_date).
-    document.getElementById('view_rec_case_id').value            = document.getElementById('view_case_id_hidden').value;
-    document.getElementById('view_rec_hidden_text').value        = messageText;
-    document.getElementById('view_rec_return_tab').value         = window._currentCaseStatus || 'verified';
-    document.getElementById('view_rec_has_recommendation').value = '0';
-    document.getElementById('view_rec_followup_date').value      = dateVal;
-    document.getElementById('view_rec_clear_followup').value     = '0';
-    document.getElementById('view_rec_form').submit();
+    // Reuse the recommendation-send pipeline (background request): it posts a staff bubble into
+    // the chat thread and saves the inspection date on the case (disease_cases.follow_up_date).
+    const schedBtn = document.getElementById('view_inspection_confirm_btn');
+    const schedBtnLabel = schedBtn.textContent;
+    schedBtn.disabled = true;
+    schedBtn.textContent = isEdit ? 'Updating…' : 'Scheduling…';
+    queueRecSend({
+        case_id_hidden:       document.getElementById('view_case_id_hidden').value,
+        recommendation_text:  messageText,
+        return_tab:           window._currentCaseStatus || 'verified',
+        has_recommendation:   '0',
+        follow_up_date:       dateVal,
+        clear_follow_up_date: '0'
+    }).then(d => {
+        // Always reset the picker + button from the server's answer. (applyCaseMessageState only does
+        // this when the date differs from what the page already knew — e.g. only the time changed, or
+        // the background check already applied the new date — which left the button stuck on "Updating…".)
+        refreshInspectionUi(d.follow_up_date);
+        showAppToast(isEdit ? 'Inspection rescheduled — the farmer was notified.' : 'Inspection scheduled — the farmer was notified.');
+    }).catch(err => {
+        schedBtn.textContent = schedBtnLabel;
+        updateInspectionBtnState();
+        showAppToast((err && err.message) ? err.message : 'Could not schedule the inspection.', 'error');
+    });
 }
 
 // ── PHOTO LIGHTBOX — enlarge evidence photos without leaving the case file ──
