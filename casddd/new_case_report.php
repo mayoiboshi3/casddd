@@ -58,6 +58,24 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 // Personnel log helpers — who is signed in, so the case records its creator.
 require_once __DIR__ . '/personnel_log.php';
 
+// ── Styled result dialog (same look as the "Status Updated" dialog on reports.php) ──
+// $go: 'back' = return to the form after it is dismissed, or a URL = go there (auto-closes with a progress bar when $autoMs > 0).
+// Falls back to a plain alert() only if this file is ever used without reports.php's dialog helpers.
+function ncr_notice($type, $title, $message, $go = 'back', $autoMs = 0) {
+    if (function_exists('casd_dialog_assets')) {
+        casd_dialog_assets();
+        $f = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE;
+        if ($go === 'back') {
+            echo '<script>casdAlert(' . json_encode((string)$message, $f) . ',' . json_encode(['type' => $type, 'title' => $title], $f) . ').then(function(){history.back();});</script>';
+        } else {
+            casd_alert_redirect($type, $title, $message, $go, $autoMs);
+        }
+        return;
+    }
+    $m = json_encode((string)$message, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE);
+    echo '<script>alert(' . $m . ');' . ($go === 'back' ? 'history.back();' : 'window.location=' . json_encode($go) . ';') . '</script>';
+}
+
 // ── 1. HANDLE DATABASE INSERT (up to 3 diseases optional, 1+ photos required) ──
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
 
@@ -65,7 +83,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
 
     // Server-side guard — cap at 3, selection itself is optional
     if (count($disease_ids) > 3) {
-        echo "<script>alert('You can select at most 3 diseases.'); window.history.back();</script>";
+        ncr_notice('warning', 'Too Many Diseases', 'You can select at most 3 diseases per report.');
         exit;
     }
     if (count($disease_ids) === 0) {
@@ -90,7 +108,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
     $farmer_id    = (int) ($_POST['farmer_id'] ?? 0);
     $fchk         = $farmer_id > 0 ? mysqli_query($conn, "SELECT farmer_id FROM farmers WHERE farmer_id = $farmer_id LIMIT 1") : false;
     if (!$fchk || mysqli_num_rows($fchk) !== 1) {
-        echo "<script>alert('Please select a valid farmer.'); window.history.back();</script>";
+        ncr_notice('warning', 'Select a Farmer', 'Please select a valid farmer before submitting.');
         exit;
     }
     $brgy_id      = mysqli_real_escape_string($conn, $_POST['brgy_id']);
@@ -123,7 +141,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
     // Photo evidence is REQUIRED — at least one image must have uploaded successfully
     // (a file that was the wrong type or failed to upload doesn't count).
     if (empty($saved_filenames)) {
-        echo "<script>alert('A photo is required. Please attach at least one valid image (JPG, PNG, GIF or WEBP) of the affected crop.'); window.history.back();</script>";
+        ncr_notice('warning', 'Photo Required', "Please attach at least one valid image (JPG, PNG, GIF or WEBP) of the affected crop.");
         exit;
     }
     $photo_evidence_val = "'" . mysqli_real_escape_string($conn, implode(',', $saved_filenames)) . "'";
@@ -142,10 +160,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
     }
 
     if ($insertedCount > 0) {
-        echo "<script>alert('Report Successfully Submitted for Review! ($insertedCount disease(s) logged under $ref_id)'); window.location='reports.php?tab=pending';</script>";
+        ncr_notice('success', 'Report Submitted',
+            "A report has been created.\n\nReference: $ref_id",
+            'reports.php?view=disease&tab=pending', 3500);
         exit;
     } else {
-        echo "<script>alert('Something went wrong while saving the report. Please try again.'); window.history.back();</script>";
+        ncr_notice('error', 'Could Not Save Report', 'Something went wrong while saving the report. Please try again.');
         exit;
     }
 }
