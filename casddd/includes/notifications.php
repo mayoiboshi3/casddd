@@ -14,7 +14,9 @@
  *   - open  notifications_feed.php?debug=1  in the browser  -> must show JSON with "ok": true and no query_errors
  *   - press F12, Console, type  casdNotifTest()             -> must show a test alert (proves this file is loaded)
  */
-$__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/') . '/notifications_feed.php';
+$__cntBase = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+$__cntFeed = $__cntBase . '/notifications_feed.php';
+$__cntChat = $__cntBase . '/chat_feed.php';
 ?>
 <style id="cnt-css">
 :root{--cnt-top:20px;--cnt-right:20px}
@@ -36,6 +38,21 @@ $__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')
 .cnt-x{position:absolute;top:10px;right:12px;background:none;border:0;color:#94a3b8;cursor:pointer;font-size:14px;line-height:1;padding:2px}
 .cnt-x:hover{color:#0f172a}
 .cnt-bar{position:absolute;left:0;right:0;bottom:0;height:3px;background:var(--c);transform-origin:left;animation:cntBar var(--cnt-dur,12s) linear both;border-radius:0 0 12px 0}
+/* new chat message from a farmer -- dark bubble, avatar + quoted text, so it never looks like a report alert */
+.cnt-chat{pointer-events:auto;position:relative;display:flex;gap:12px;align-items:flex-start;background:#0f172a;color:#fff;padding:14px 16px 16px;border-radius:22px 22px 22px 6px;border:1px solid #1e293b;box-shadow:0 24px 50px -12px rgba(2,6,23,.65);font-family:Inter,system-ui,sans-serif;animation:cntSlide .4s cubic-bezier(.34,1.56,.64,1) both;cursor:pointer;overflow:hidden}
+.cnt-chat.cnt-out{animation:cntSlideOut .22s ease both}
+.cnt-chat .cc-av{flex:0 0 auto;position:relative;width:42px;height:42px;border-radius:50%;background:linear-gradient(135deg,#06b6d4,#0e7490);display:flex;align-items:center;justify-content:center;font:900 16px Inter,system-ui,sans-serif;color:#fff}
+.cnt-chat .cc-av::after{content:'';position:absolute;right:-2px;bottom:-2px;width:13px;height:13px;border-radius:50%;background:#22d3ee;border:2px solid #0f172a}
+.cnt-chat .cc-txt{min-width:0;flex:1}
+.cnt-chat .cc-tag{font-size:9px;font-weight:900;letter-spacing:.14em;text-transform:uppercase;color:#22d3ee;display:flex;align-items:center;gap:6px}
+.cnt-chat .cc-n{background:#22d3ee;color:#083344;border-radius:999px;padding:1px 7px;font-size:9px;letter-spacing:.04em}
+.cnt-chat .cc-name{font-size:14px;font-weight:900;margin-top:2px;padding-right:18px}
+.cnt-chat .cc-quote{margin-top:7px;background:rgba(255,255,255,.09);border-radius:14px 14px 14px 4px;padding:8px 11px;font-size:12px;font-weight:600;line-height:1.45;color:#e2e8f0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;word-break:break-word}
+.cnt-chat .cc-go{margin-top:10px;background:#22d3ee;color:#083344;border:0;border-radius:999px;padding:7px 14px;font:900 10px Inter,system-ui,sans-serif;letter-spacing:.1em;text-transform:uppercase;cursor:pointer}
+.cnt-chat .cc-go:hover{background:#67e8f9}
+.cnt-chat .cc-x{position:absolute;top:10px;right:12px;background:none;border:0;color:#64748b;cursor:pointer;font-size:14px;line-height:1;padding:2px}
+.cnt-chat .cc-x:hover{color:#fff}
+.cnt-chat .cc-bar{position:absolute;left:0;right:0;bottom:0;height:3px;background:#22d3ee;transform-origin:left;animation:cntBar var(--cnt-dur,15s) linear both}
 /* highlighted report rows on reports.php */
 :is(.dr-row,.ph-row).cnt-hl{position:relative;background:linear-gradient(90deg,#fffbeb,#fff) !important;box-shadow:inset 0 0 0 2px #fbc02d,0 8px 22px -10px rgba(251,192,45,.8);animation:cntGlow 1.6s ease-in-out 4}
 :is(.dr-row,.ph-row).cnt-hl::after{content:attr(data-cnt-label);position:absolute;top:0;right:16px;background:#10b981;color:#fff;font:900 9px Inter,system-ui,sans-serif;letter-spacing:.14em;padding:3px 10px 4px;border-radius:0 0 10px 10px;box-shadow:0 4px 10px -3px rgba(16,185,129,.6);pointer-events:none}
@@ -46,7 +63,7 @@ $__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')
 @keyframes cntSlide{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:none}}
 @keyframes cntSlideOut{to{opacity:0;transform:translateX(40px)}}
 @keyframes cntBar{from{transform:scaleX(1)}to{transform:scaleX(0)}}
-@media (prefers-reduced-motion:reduce){.cnt-badge,.cnt-toast,.cnt-bar,:is(.dr-row,.ph-row).cnt-hl{animation:none}}
+@media (prefers-reduced-motion:reduce){.cnt-badge,.cnt-toast,.cnt-chat,.cnt-bar,.cc-bar,:is(.dr-row,.ph-row).cnt-hl{animation:none}}
 </style>
 
 <script>
@@ -55,6 +72,7 @@ $__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')
     window.__casdNotif = true;
 
     var FEED = <?= json_encode($__cntFeed, JSON_UNESCAPED_SLASHES) ?>;
+    var CHAT_FEED = <?= json_encode($__cntChat, JSON_UNESCAPED_SLASHES) ?>;
     var KEY = 'casd_notif_v2', INTERVAL = 10000, HIDDEN_EVERY = 3, MAX_ITEMS = 100, MAX_TOASTS = 4, TOAST_MS = 12000, HL_MS = 30 * 60 * 1000, SCROLL_KEY = 'casd_notif_scroll';
     var KINDS = {
         report: { tag: 'Disease report', c: '#f97316', bg: 'rgba(249,115,22,.12)', view: 'disease', p: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
@@ -64,14 +82,14 @@ $__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')
     };
 
     var state = load(), busy = false, ownWriteAt = 0, firstPoll = true, ticks = 0, flash = false;
-    var baseTitle = document.title.replace(/^(\(\d+\+?\)|\u25CF NEW REPORT)\s*/, '');
+    var baseTitle = document.title.replace(/^(\(\d+\+?\)|\u25CF NEW REPORT|\u25CF NEW MESSAGE|\uD83D\uDCAC \d+)\s*/, '');
     var toasts, badges = [];
     var page = location.pathname.replace(/.*\//, '');
     var curView = page === 'reports.php' ? (new URLSearchParams(location.search).get('view') || 'disease') : null;
 
     function load() {
         try { var s = JSON.parse(localStorage.getItem(KEY) || 'null'); if (s && Array.isArray(s.items)) return s; } catch (e) {}
-        return { cursor: null, items: [] };
+        return { cursor: null, items: [], ids: {} };
     }
     function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
     function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -105,7 +123,11 @@ $__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')
     function render() {
         var un = unreadItems(), n = un.length, txt = n > 99 ? '99+' : String(n);
         badges.forEach(function (b) { b.hidden = n === 0; b.textContent = txt; b.title = n + ' new'; });
-        document.title = (n ? (flash ? '\u25CF NEW REPORT ' : '(' + txt + ') ') : '') + baseTitle;
+        var m = chatUnreadCount(), prefix = '';
+        if (!document.hidden) { m = 0; n = 0; }                 // looking at the tab: plain title (the count only shows while the tab is in the background)
+        if (m) prefix = flash ? '\u25CF NEW MESSAGE ' : '\uD83D\uDCAC ' + m + ' ';
+        else if (n) prefix = flash ? '\u25CF NEW REPORT ' : '(' + txt + ') ';
+        document.title = prefix + baseTitle;
     }
 
     // ── pop-up for every new report ──
@@ -113,7 +135,7 @@ $__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')
     function toast(item) {
         var k = KINDS[item.kind] || KINDS.report;
         var el = document.createElement('div');
-        el.className = 'cnt-toast'; el.setAttribute('role', 'alert');
+        el.className = 'cnt-toast'; el.setAttribute('role', 'alert'); el.setAttribute('data-key', item.key || ''); el.setAttribute('data-kind', item.kind || '');
         el.style.cssText = '--c:' + (item.urgent ? '#ef4444' : k.c) + ';--c-bg:' + k.bg + ';--cnt-dur:' + TOAST_MS + 'ms';
         el.innerHTML = icon(k) + '<div class="cnt-txt"><div class="cnt-tag">' + esc(k.tag) + '</div>' +
             '<div class="cnt-title">' + esc(item.title) + (item.urgent ? '<span class="cnt-urg">High severity</span>' : '') + '</div>' +
@@ -204,19 +226,26 @@ $__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')
                 if (!d || !d.ok) { console.warn('[notifications] feed answered, but not OK. Open ' + FEED + '?debug=1'); return; }
                 var known = {}, fresh = [], now = Date.now();
                 var mine = (now - ownWriteAt) < 10000;           // the person's own accept/reject: recorded quietly
+                var touch = chatLoad().touch || {};              // chats that just got a message: that is NOT a report update
                 state.items.forEach(function (i) { known[i.id] = 1; });
+                state.ids = state.ids || {};
+                Object.keys(state.ids).forEach(function (k) { known[k] = 1; });     // ids announced before, even if trimmed from the list
                 (d.events || []).forEach(function (e) {
                     if (known[e.id]) return;
-                    known[e.id] = 1;
+                    known[e.id] = 1; state.ids[e.id] = 1;
                     var item = { id: e.id, key: e.key || null, kind: e.kind, title: e.title, body: e.body, link: e.link, urgent: !!e.urgent,
                                  at: now - (e.ago || 0) * 1000, read: !!d.initial || (mine && e.kind === 'status') };
+                    if (e.kind === 'status' && touch[e.key] && (now - touch[e.key]) < 120000) item.read = true;   // same moment as a chat message -> stay quiet
                     item.hl = !item.read;                // quiet / first-load items are not highlighted
                     state.items.push(item);
+                    var onScreen = !item.read && curView && !document.hidden && kindView(item) === curView;
                     if (!item.read) fresh.push(item);            // every NEW report alerts, even one the person added
+                    if (onScreen) item.read = true;              // ...but if its page is open in front of you, the red number never appears (the row highlight stays)
                 });
                 state.items.sort(function (a, b) { return b.at - a.at; });
                 state.items = state.items.slice(0, MAX_ITEMS);
                 state.cursor = d.cursor;
+                var idKeys = Object.keys(state.ids); if (idKeys.length > 1500) { idKeys.slice(0, idKeys.length - 1000).forEach(function (k) { delete state.ids[k]; }); }
                 if (firstPoll) { firstPoll = false; clearCurrentView(); }
                 save(); render(); highlightRows(); announce(fresh);
             })
@@ -234,6 +263,119 @@ $__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')
         var p = _fetch.apply(this, arguments);
         try { if (init && init.method && String(init.method).toUpperCase() === 'POST') { p.then(function () { ownWriteAt = Date.now(); }, function () {}); } } catch (e) {}
         return p;
+    };
+
+
+    // ══ CHAT: new farmer messages ══
+    // Every chat is tracked on its own: the browser remembers how many replies it has already seen in EACH chat
+    // (seen[chatKey] = count). A chat alerts only when its own count goes up -- so one chat can never re-announce
+    // another, a reload or a second tab can never replay old messages, and nothing depends on a shared timestamp.
+    // The very first check on a browser only records the current counts (no alerts for old messages).
+    var CKEY = 'casd_chat_v1', CHAT_MS = 5000, CHAT_HIDDEN_EVERY = 6, CHAT_TOAST_MS = 15000;
+    var cstate = chatLoad(), chatBusy = false, chatTicks = 0, chatPops = {};
+
+    function chatLoad() {
+        try { var s = JSON.parse(localStorage.getItem(CKEY) || 'null'); if (s && typeof s.seen === 'object' && s.seen) { s.unread = s.unread || {}; return s; } } catch (e) {}
+        return { init: false, seen: {}, unread: {} };
+    }
+    function chatSave() { try { localStorage.setItem(CKEY, JSON.stringify(cstate)); } catch (e) {} }
+    function chatUnreadCount() { return Object.keys(cstate.unread).filter(function (k) { return cstate.unread[k] > 0; }).length; }
+    function chatKeyOf(d) { return d.reference_id ? String(d.reference_id) : 'c' + d.case_id; }
+    function chatIsOpen(key) {      // the person is looking at this very chat right now
+        var m = document.getElementById('messageModal'), d = window._currentViewData;
+        return !!(m && !m.classList.contains('hidden') && d && !document.hidden && chatKeyOf(d) === key);
+    }
+    function chatDrop(key, instant) {
+        var p = chatPops[key]; if (!p) return;
+        delete chatPops[key]; p.gone(instant);
+    }
+    function chatClear(key) { chatDrop(key, true); if (cstate.unread[key]) { delete cstate.unread[key]; chatSave(); } render(); }
+
+    function chatToast(a) {
+        var c = a.c, key = c.key, total = cstate.unread[key] || a.n;
+        chatDrop(key, true);                                      // one pop-up per chat: a newer message replaces the old one
+        var last = (c.tail && c.tail.length) ? c.tail[c.tail.length - 1] : '';
+        if (last.length > 160) last = last.slice(0, 160) + '\u2026';
+        var name = c.name || 'Farmer';
+        var el = document.createElement('div');
+        el.className = 'cnt-chat'; el.setAttribute('role', 'alert');
+        el.style.setProperty('--cnt-dur', CHAT_TOAST_MS + 'ms');
+        el.innerHTML = '<span class="cc-av">' + esc(name.charAt(0).toUpperCase()) + '</span><div class="cc-txt">' +
+            '<div class="cc-tag">\uD83D\uDCAC New message' + (total > 1 ? '<span class="cc-n">' + total + ' new</span>' : '') + '</div>' +
+            '<div class="cc-name">' + esc(name) + '</div>' +
+            (last ? '<div class="cc-quote">' + esc(last) + '</div>' : '') +
+            '<button type="button" class="cc-go">Open chat</button></div>' +
+            '<button type="button" class="cc-x" aria-label="Dismiss">\u2715</button><div class="cc-bar"></div>';
+        var timer;
+        function gone(instant) {
+            clearTimeout(timer);
+            if (instant) { if (el.parentNode) el.parentNode.removeChild(el); return; }
+            el.classList.add('cnt-out'); setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 220);
+        }
+        el.addEventListener('click', function (e) {
+            if (e.target.closest('.cc-x')) { if (chatPops[key] && chatPops[key].el === el) delete chatPops[key]; gone(); return; }   // closing keeps the unread mark
+            var link = safeLink(c.link);
+            chatClear(key);
+            if (chatIsOpen(key)) return;
+            window.location.href = link;
+        });
+        toasts.appendChild(el);
+        while (toasts.children.length > MAX_TOASTS + 2) toasts.removeChild(toasts.firstChild);
+        chatPops[key] = { el: el, gone: gone };
+        timer = setTimeout(function () { if (chatPops[key] && chatPops[key].el === el) delete chatPops[key]; gone(); }, CHAT_TOAST_MS);
+    }
+
+    // A chat message also bumps the case's row in the database. If that produced a report-update item/pop-up for this
+    // chat in the last two minutes, take it back: a chat message must only ever show the chat alert.
+    function quietStatus(key) {
+        var now = Date.now(), changed = false;
+        state = load();
+        state.items.forEach(function (i) { if (i.kind === 'status' && keyOf(i) === key && now - i.at < 120000 && (!i.read || i.hl)) { i.read = true; i.hl = false; changed = true; } });
+        if (changed) save();
+        Array.prototype.forEach.call(document.querySelectorAll('.cnt-toast[data-kind="status"]'), function (t) { if (t.getAttribute('data-key') === key && t.parentNode) t.parentNode.removeChild(t); });
+        if (changed) { render(); highlightRows(); }
+    }
+    function chatPoll() {
+        if (chatBusy || document.prerendering) return;
+        chatBusy = true;
+        fetch(CHAT_FEED, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, cache: 'no-store', credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (!d || !d.ok || !Array.isArray(d.chats)) { console.warn('[notifications] chat feed not OK. Open ' + CHAT_FEED + ' in the browser.'); return; }
+                cstate = chatLoad();                               // newest stored state (other tabs may have just announced)
+                var first = !cstate.init, alerts = [];
+                d.chats.forEach(function (c) {
+                    var prev = cstate.seen[c.key];
+                    if (first) { cstate.seen[c.key] = c.count; return; }          // first run on this browser: just learn the counts
+                    if (prev === undefined) prev = 0;                              // a chat that got its first reply
+                    if (c.count > prev) {
+                        cstate.seen[c.key] = c.count;
+                        cstate.touch = cstate.touch || {}; cstate.touch[c.key] = Date.now(); quietStatus(c.key);
+                        if (chatIsOpen(c.key)) return;                             // reading it right now
+                        cstate.unread[c.key] = (cstate.unread[c.key] || 0) + (c.count - prev);
+                        alerts.push({ c: c, n: c.count - prev });
+                    } else if (c.count < prev) {                                   // replies removed: follow quietly, never alert
+                        cstate.seen[c.key] = c.count;
+                        if (cstate.unread[c.key] > c.count) cstate.unread[c.key] = c.count;
+                    }
+                });
+                cstate.init = true;
+                var tk = cstate.touch || {}; Object.keys(tk).forEach(function (k) { if (Date.now() - tk[k] > 600000) delete tk[k]; });
+                chatSave(); render();
+                if (alerts.length) { bump(); alerts.forEach(chatToast); }
+            })
+            .catch(function (err) { console.warn('[notifications] could not reach ' + CHAT_FEED + ' (' + err + '). Put chat_feed.php in the same folder as reports.php.'); })
+            .finally(function () { chatBusy = false; });
+    }
+    function chatTick() { if (document.hidden && (++chatTicks % CHAT_HIDDEN_EVERY) !== 0) return; chatPoll(); }
+
+    // review.php calls this when a chat window is opened: that chat counts as read.
+    window.casdChatOpened = function (key) { chatClear(key); setTimeout(chatPoll, 500); };
+
+    // Test: F12 -> casdChatTest()  shows a sample message alert.
+    window.casdChatTest = function () {
+        var c = { key: 'TEST-CHAT', case: 0, name: 'Test Farmer', count: 1, tail: ['Magandang araw po, may bago pong dahon na nanilaw sa taniman ko.'], link: 'reports.php?view=disease' };
+        cstate = chatLoad(); cstate.unread['TEST-CHAT'] = 1; chatSave(); render(); chatToast({ c: c, n: 1 });
     };
 
     // For checking that everything is wired up: type casdNotifTest() in the browser console (F12).
@@ -263,9 +405,13 @@ $__cntFeed = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')
         mountBadges(); watchRows();
         clearCurrentView(); render(); poll();                   // stored unread items for the view being opened count as seen
         setInterval(tick, INTERVAL);
-        setInterval(function () { flash = document.hidden && unreadItems().length > 0 ? !flash : false; render(); }, 1000);   // flashing tab title
-        document.addEventListener('visibilitychange', function () { if (!document.hidden) { flash = false; render(); poll(); } });
-        window.addEventListener('storage', function (e) { if (e.key === KEY) { state = load(); render(); highlightRows(); } });   // other tab
+        chatPoll(); setInterval(chatTick, CHAT_MS);
+        setInterval(function () { flash = document.hidden && (unreadItems().length > 0 || chatUnreadCount() > 0) ? !flash : false; render(); }, 1000);   // flashing tab title
+        document.addEventListener('visibilitychange', function () { if (!document.hidden) { flash = false; clearCurrentView(); render(); poll(); chatPoll(); } });
+        window.addEventListener('storage', function (e) {   // other tab
+            if (e.key === KEY) { state = load(); render(); highlightRows(); }
+            if (e.key === CKEY) { cstate = chatLoad(); Object.keys(chatPops).forEach(function (k) { if (!cstate.unread[k]) chatDrop(k, true); }); render(); }   // read in another tab -> close here too
+        });
     }
     function boot() { if (document.prerendering) { document.addEventListener('prerenderingchange', boot, { once: true }); return; } start(); }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();

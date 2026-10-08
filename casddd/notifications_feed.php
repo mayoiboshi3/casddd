@@ -13,7 +13,7 @@
  * the website OR the mobile app shows up:
  *   - new manual disease report            (disease_cases.source = 'manual_report')
  *   - new AI scan                          (disease_cases.source = 'scan')
- *   - manual report status changed         (verified / resolved / rejected / edited)
+ *   - manual report status changed         (verified / resolved / rejected -- real status changes only)
  *   - new planting / harvesting report     (planting_harvesting_reports)
  *
  * The cursor is {t: DB time, c: highest case_id, f: highest report_id}. A row with an id above the
@@ -112,18 +112,31 @@ foreach ((array)$rows as $r) {
     ]);
 }
 
-// 2) CHANGED manual reports (verified / resolved / rejected / edited) -- not on the first call
+// 2) STATUS CHANGES on manual reports (verified / resolved / rejected) -- not on the first call.
+//    IMPORTANT: disease_cases.updated_at is "ON UPDATE CURRENT_TIMESTAMP", so it moves on EVERY write to the row --
+//    including each chat message (farmer reply, staff message, inspection notice). Using it here made every chat
+//    message look like a "report update" and re-announce that case. The status-specific stamps below are only
+//    written when the status really changes (see reports.php), so chat activity can no longer trigger this.
 if (!$initial) {
     $t0e = mysqli_real_escape_string($conn, $t0);
-    $rows = nf_rows($conn, "$caseSelect
-        WHERE dc.case_id <= $c0 AND dc.source = 'manual_report' AND dc.updated_at >= '$t0e'
-        ORDER BY dc.updated_at DESC LIMIT 80");
+    $stamp = "(CASE dc.status WHEN 'verified' THEN dc.verified_at WHEN 'resolved' THEN dc.resolved_at WHEN 'rejected' THEN dc.rejected_at END)";
+    $rows = nf_rows($conn, "SELECT dc.case_id, dc.reference_id, dc.status, dc.severity, dc.source, $stamp AS st_at,
+            b.name AS barangay, d.disease_name, f.farmer_name,
+            TIMESTAMPDIFF(SECOND, $stamp, NOW()) AS ago
+        FROM disease_cases dc
+        LEFT JOIN barangays b ON b.id = dc.barangay_id
+        LEFT JOIN diseases  d ON d.disease_id = dc.disease_id
+        LEFT JOIN farmers   f ON f.farmer_id = dc.farmer_id
+        WHERE dc.case_id <= $c0 AND dc.source = 'manual_report'
+          AND dc.status IN ('verified','resolved','rejected')
+          AND $stamp >= '$t0e'
+        ORDER BY $stamp DESC LIMIT 80");
     $labels = ['verified' => 'Report verified', 'resolved' => 'Report resolved', 'rejected' => 'Report rejected'];
     foreach ((array)$rows as $r) {
         $key = ($r['reference_id'] ?? '') !== '' ? $r['reference_id'] : 'c' . $r['case_id'];
         $st  = strtolower((string)($r['status'] ?? ''));
         nf_add($events, [
-            'id'     => 'case:' . $key . ':' . $st . ':' . $r['updated_at'],
+            'id'     => 'case:' . $key . ':' . $st . ':' . $r['st_at'],
             'key'    => $key,
             'kind'   => 'status',
             'title'  => $labels[$st] ?? 'Report updated',

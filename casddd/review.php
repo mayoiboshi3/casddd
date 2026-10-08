@@ -1170,6 +1170,7 @@ function openMessageModal() {
     closeCancelInspectionOverlay();
 
     document.getElementById('messageModal').classList.remove('hidden');
+    if (window.casdChatOpened) window.casdChatOpened(data.reference_id ? String(data.reference_id) : 'c' + data.case_id);   // this chat is being read
     pollCaseMessages();   // pick up any new farmer reply right away
     const box = document.getElementById('messageModalBox');
     box.style.animation = 'none';
@@ -1757,7 +1758,6 @@ function refreshInspectionUi(followUpDate) {
 function applyCaseMessageState(d, fromPoll) {
     const data = window._currentViewData;
     if (!data || String(data.case_id) !== String(d.case_id)) return;   // user moved to another case meanwhile
-    const prevFarmerCount = (data.messages || []).filter(m => m.sender === 'farmer').length;
 
     // Update the shared case object too, so re-opening this case from the list shows current data.
     data.messages               = d.messages || [];
@@ -1775,13 +1775,8 @@ function applyCaseMessageState(d, fromPoll) {
         refreshInspectionUi(d.follow_up_date);
     }
 
-    if (fromPoll) {
-        const nowFarmerCount = data.messages.filter(m => m.sender === 'farmer').length;
-        const messengerHidden = document.getElementById('messageModal').classList.contains('hidden');
-        if (nowFarmerCount > prevFarmerCount && messengerHidden) {
-            showAppToast('💬 New reply from ' + (data.farmer_name || 'the farmer'));
-        }
-    }
+    // New-reply alerts now come from includes/notifications.php (chat_feed.php), which tracks every chat on its own.
+    // The old toast compared against the list data loaded with the page, so it fired for stale chats.
 }
 
 // Background check for new messages — only while a case file is open and the tab is visible.

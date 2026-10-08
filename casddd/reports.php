@@ -442,35 +442,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['reassign_disease'])) {
     }
 }
 
-// 2a-bis. IDENTIFY AN UNIDENTIFIED AI SCAN
-// The AI sometimes answers "Other" (it could not match the photo to a known disease). Scans are stored
-// differently from manual reports — disease_id is EMPTY (the AI's answer only lives in the description
-// text) and source = 'scan' — so they never matched the manual rule above (Pending + disease_id 999).
-// This handler is keyed on the scan's own case_id (not on any reference_id), and only fills in
-// disease_id. The AI's original answer in the description is left untouched as the record.
-if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['reassign_scan_disease'])) {
-    $scan_case_id = (int) ($_POST['case_id_hidden'] ?? 0);
-    $scan_disease = (int) ($_POST['new_disease_id'] ?? 0);
-    $scan_back    = 'reports.php?view=scans&scan_id=' . $scan_case_id;
-
-    $sc_q   = mysqli_query($conn, "SELECT source, disease_id, description FROM disease_cases WHERE case_id = $scan_case_id LIMIT 1");
-    $sc_row = $sc_q ? mysqli_fetch_assoc($sc_q) : null;
-    $dz_q   = $scan_disease > 0 && $scan_disease !== 999
-        ? mysqli_query($conn, "SELECT disease_id FROM diseases WHERE disease_id = $scan_disease LIMIT 1") : false;
-
-    $scanIsUnidentified = $sc_row
-        && $sc_row['source'] === 'scan'
-        && in_array((int)($sc_row['disease_id'] ?? 0), [0, 999], true)
-        && preg_match('/AI scan:\s*(other|unidentified|unknown)\b/i', (string)$sc_row['description']);
-
-    if ($scanIsUnidentified && $dz_q && mysqli_num_rows($dz_q) === 1) {
-        mysqli_query($conn, "UPDATE disease_cases SET disease_id = $scan_disease, updated_at = NOW() WHERE case_id = $scan_case_id AND `source` = 'scan'");
-        casd_alert_redirect('success', 'Scan Identified', 'The disease was saved for this scan.', $scan_back, 1800);
-    } else {
-        casd_alert_redirect('warning', 'Action Not Available', 'This can only be done for AI scans the AI could not identify ("Other"), and a disease must be selected.', $scan_back);
-    }
-    exit;
-}
+// (Identifying an "Other" AI scan by hand was removed: scans keep the AI's result.)
 
 // 2b. HANDLE SENDING THE DISEASE RECOMMENDATION TO THE FARMER
 // If the reviewer picked an actual treatment instruction (has_recommendation=1),
@@ -1676,9 +1648,6 @@ $scanParse = function ($desc) {
 
 // One row per scan. Same grouping idea as Disease Reports (rows sharing a reference_id are one
 // file); a scan with an empty reference_id is kept on its own instead of being merged with others.
-$scanDiseaseOptions = [];
-$sdo_q = mysqli_query($conn, "SELECT disease_id, disease_name FROM diseases WHERE disease_id != 999 ORDER BY disease_name ASC");
-if ($sdo_q) { while ($d = mysqli_fetch_assoc($sdo_q)) { $scanDiseaseOptions[] = $d; } }
 $scanGroups = [];
 $scanOrder  = [];
 $scan_q = mysqli_query($conn, "SELECT dc.case_id, dc.reference_id, dc.report_date, dc.description,
@@ -1944,21 +1913,6 @@ if ($scan_q) {
                     <a id="scanModalMap" href="#" target="_blank" rel="noopener" style="display:inline-block;margin-top:4px;color:#059669;font-size:0.7rem;font-weight:800;text-decoration:underline;">Open in Maps</a>
                 </div>
 
-                <!-- Only shown for scans the AI could not identify ("Other"): staff pick the real disease after inspection. -->
-                <form id="scanIdentifyWrap" method="POST" action="reports.php?view=scans" style="display:none;border-top:1px solid #f1f5f9;padding-top:12px;">
-                    <input type="hidden" name="reassign_scan_disease" value="1">
-                    <input type="hidden" name="case_id_hidden" id="scanIdentifyCase" value="">
-                    <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 6px;">Identify Disease (after inspection)</p>
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                        <select name="new_disease_id" required style="flex:1;min-width:180px;font-size:0.78rem;font-weight:700;color:#0f172a;border:1px solid #e2e8f0;border-radius:10px;padding:9px 10px;background:#f8fafc;">
-                            <option value="" disabled selected>— Select disease —</option>
-                            <?php foreach ($scanDiseaseOptions as $__sd): ?>
-                            <option value="<?= (int)$__sd['disease_id'] ?>"><?= htmlspecialchars($__sd['disease_name']) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                        <button type="submit" style="background:#111827;color:#fff;border:0;border-radius:10px;padding:9px 16px;font-size:0.65rem;font-weight:900;letter-spacing:0.1em;text-transform:uppercase;cursor:pointer;">Save</button>
-                    </div>
-                </form>
             </div>
         </div>
     </div>
@@ -2034,14 +1988,6 @@ function openScanModal(d) {
         geoWrap.style.display = 'block';
     } else {
         geoWrap.style.display = 'none';
-    }
-
-    // Disease picker — only for scans the AI could not identify.
-    var idWrap = document.getElementById('scanIdentifyWrap');
-    if (idWrap) {
-        idWrap.style.display = d.unidentified ? 'block' : 'none';
-        document.getElementById('scanIdentifyCase').value = d.case_id;
-        var sel = idWrap.querySelector('select'); if (sel) sel.selectedIndex = 0;
     }
 
     modal.classList.remove('hidden');
@@ -2536,8 +2482,7 @@ foreach (['disease', 'farm', 'scans'] as $__v) { if ($__v !== $view) { $casdSpec
         if (section === 'disease' && window.drSilentRefresh) {
             if (modalOpen()) return;                       // try again on the next check; don't disturb an open report
             if (!window.drSilentRefresh()) return;         // a refresh is already running
-            seen[section] = newSig;
-            say('Reports updated');
+            seen[section] = newSig;      // list refreshed quietly -- no banner
             return;
         }
         seen[section] = newSig;
