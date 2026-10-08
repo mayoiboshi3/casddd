@@ -9,6 +9,15 @@ if ($conn->connect_error) {
 }
 $conn->set_charset('utf8mb4'); // so names like "Bañadero" come through intact
 
+if (isset($conn) && $conn) {
+    mysqli_query($conn, "UPDATE disease_cases dc
+                         INNER JOIN farmers f ON f.farmer_id = dc.farmer_id
+                         SET dc.barangay_id = f.barangay_id,
+                             dc.updated_at  = dc.updated_at
+                         WHERE dc.barangay_id IS NULL
+                           AND f.barangay_id IS NOT NULL");
+}
+
 // ── STAT: Total Farmers ──
 $totalFarmers = 0;
 $f = $conn->query("SELECT COUNT(*) AS cnt FROM farmers WHERE status = 'active'");
