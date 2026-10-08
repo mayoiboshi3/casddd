@@ -1558,7 +1558,7 @@ window.casePaginate = function (cfg) {
                 <div class="min-w-0">
                     <div class="flex items-center gap-2 flex-wrap">
                         <span class="font-bold text-gray-900 text-sm truncate"><?= htmlspecialchars($farmer_display) ?></span>
-                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-300"><?= htmlspecialchars($row['reference_id']) ?></span>
+                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-800"><?= htmlspecialchars($row['reference_id']) ?></span>
                         <span class="dr-type-chip"><?= htmlspecialchars($combined['name'] ?: '—') ?></span>
                     </div>
                     <p class="text-xs text-gray-500 font-medium truncate">
@@ -1835,7 +1835,7 @@ if ($scan_q) {
                     <div class="flex items-center gap-2 flex-wrap">
                         <span class="font-bold text-gray-900 text-sm truncate"><?= htmlspecialchars($sFarmer) ?></span>
                         <?php if (!empty($srow['reference_id'])): ?>
-                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-300"><?= htmlspecialchars($srow['reference_id']) ?></span>
+                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-800"><?= htmlspecialchars($srow['reference_id']) ?></span>
                         <?php endif; ?>
                         <span class="dr-type-chip"><?= htmlspecialchars($sDiseases) ?></span>
                     </div>

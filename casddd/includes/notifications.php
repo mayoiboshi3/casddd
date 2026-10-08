@@ -63,10 +63,11 @@ if (session_status() === PHP_SESSION_ACTIVE) {
 .cnt-chat .cc-x:hover{color:#fff}
 .cnt-chat .cc-bar{position:absolute;left:0;right:0;bottom:0;height:3px;background:#22d3ee;transform-origin:left;animation:cntBar var(--cnt-dur,15s) linear both}
 /* highlighted report rows on reports.php */
-:is(.dr-row,.ph-row).cnt-hl{position:relative;background:linear-gradient(90deg,#fffbeb,#fff) !important;box-shadow:inset 0 0 0 2px #fbc02d,0 8px 22px -10px rgba(251,192,45,.8);animation:cntGlow 1.6s ease-in-out 4}
+/* Highlighted report rows -- low-key, no glow, no animation. Swap the block below for any option in the preview. */
+/* Option D (active): gradient + faded border + left bar */
+:is(.dr-row,.ph-row).cnt-hl{position:relative;background:linear-gradient(90deg,#fff6d6,#fff 70%) !important;box-shadow:inset 0 0 0 1px rgba(251,192,45,.4),inset 4px 0 0 #fbc02d;animation:none}
 :is(.dr-row,.ph-row).cnt-hl::after{content:attr(data-cnt-label);position:absolute;top:0;right:16px;background:#10b981;color:#fff;font:900 9px Inter,system-ui,sans-serif;letter-spacing:.14em;padding:3px 10px 4px;border-radius:0 0 10px 10px;box-shadow:0 4px 10px -3px rgba(16,185,129,.6);pointer-events:none}
 :is(.dr-row,.ph-row).cnt-hl[data-cnt-label="UPDATED"]::after{background:#3b82f6;box-shadow:0 4px 10px -3px rgba(59,130,246,.6)}
-@keyframes cntGlow{0%,100%{box-shadow:inset 0 0 0 2px #fbc02d,0 0 0 0 rgba(251,192,45,.6)}50%{box-shadow:inset 0 0 0 2px #fbc02d,0 0 0 9px rgba(251,192,45,0)}}
 @keyframes cntPulse{0%{box-shadow:0 0 0 0 rgba(239,68,68,.65)}70%{box-shadow:0 0 0 12px rgba(239,68,68,0)}100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}}
 @keyframes cntBump{0%{transform:translateY(-50%) scale(1)}35%{transform:translateY(-50%) scale(1.45)}100%{transform:translateY(-50%) scale(1)}}
 @keyframes cntSlide{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:none}}
