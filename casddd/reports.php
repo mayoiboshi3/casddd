@@ -30,6 +30,19 @@ if ($isAjax && $CASD_AJAX_SKIP_LAYOUT) {
     include "includes/layout.php";
 }
 
+// ── AUTO-FILL MISSING BARANGAY ON CASES ──────────────────────────────────────
+// Runs on every load of this page (after the login check above). Any disease case whose barangay_id
+// is NULL gets the barangay of the farmer it belongs to (disease_cases.farmer_id -> farmers.barangay_id).
+// updated_at is set to itself so this background fix doesn't change the case's "last updated" time.
+if (isset($conn) && $conn) {
+    mysqli_query($conn, "UPDATE disease_cases dc
+                         INNER JOIN farmers f ON f.farmer_id = dc.farmer_id
+                         SET dc.barangay_id = f.barangay_id,
+                             dc.updated_at  = dc.updated_at
+                         WHERE dc.barangay_id IS NULL
+                           AND f.barangay_id IS NOT NULL");
+}
+
 // ── STYLED DIALOGS (replaces native alert()) ─────────────────────────────────
 // casd_dialog_assets() prints the dialog CSS + JS once. It also overrides window.alert,
 // so any leftover alert("...") on this page gets the same look.
@@ -268,7 +281,7 @@ function casd_reassign_unidentified_disease($conn, $case_id, array $rawIds) {
     $cur_row = $cur_q ? mysqli_fetch_assoc($cur_q) : null;
 
     $isEligible = $cur_row
-        && $cur_row['status'] === 'pending'
+        && in_array($cur_row['status'], ['pending', 'verified'], true)   // identify before resolving: allowed while Pending or Verified
         && in_array((int)($cur_row['disease_id'] ?? 0), [0, 999], true)   // 999 = web form "Other", 0/empty = mobile app with no disease
         && !empty($new_disease_ids);
     if (!$isEligible) return false;
@@ -384,6 +397,20 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
         $pendingDiseaseIds = trim((string) ($_POST['reassign_disease_ids'] ?? ''));
         if ($pendingDiseaseIds !== '' && $new_status !== 'rejected') {
             casd_reassign_unidentified_disease($conn, (int) $case_id, explode(',', $pendingDiseaseIds));
+        }
+
+        // A report that is still "Other / Unidentified" (disease_id 999) or has no disease (0 / empty, from the mobile
+        // app) can NOT be resolved: the disease must be identified first. Checked after the picker's choice above has
+        // been saved, so picking a disease and resolving in the same save still works. (Verifying is not restricted.)
+        if ($new_status === 'resolved') {
+            $chk_q   = mysqli_query($conn, "SELECT disease_id FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
+            $chk_row = $chk_q ? mysqli_fetch_assoc($chk_q) : null;
+            if (!$chk_row || in_array((int)($chk_row['disease_id'] ?? 0), [0, 999], true)) {
+                casd_alert_redirect('warning', 'Identify the Disease First',
+                    "This report is still Unidentified.\nPick the correct disease first, then resolve it.",
+                    'reports.php?view=disease&tab=' . ($cur_status ?? 'verified') . '&case_id=' . (int)$case_id);
+                exit;
+            }
         }
 
         // WHERE reference_id (not case_id) — every disease row under this report
@@ -1007,8 +1034,8 @@ $tableRows = [];
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 16px;
-        padding: 16px 24px;
+        gap: 14px;
+        padding: 9px 20px;          /* compact: a full page of 10 rows + the page buttons fits on one screen */
         cursor: pointer;
         transition: background .15s ease;
     }
@@ -1030,7 +1057,9 @@ $tableRows = [];
     }
 
     /* ── Pagination for the Disease Reports list (10 reports per page) ── */
-    .dr-pager { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; padding:16px 24px; border-top:1px solid #f3f4f6; }
+    .dr-pager { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 12px; padding:10px 20px; border-top:1px solid #f3f4f6;
+                position:static; background:#fff; }
+    #drList, #scanList { scroll-margin-top:90px; }
     .dr-pager.hidden { display:none; }
     .dr-pager-info { font-size:11px; font-weight:700; color:#9ca3af; text-transform:uppercase; letter-spacing:.05em; }
     .dr-pager-btns { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
@@ -1174,8 +1203,8 @@ window.casePaginate = function (cfg) {
     pager.innerHTML = html;
 
     if (cfg.scroll && cfg.scrollSel) {
-        var t = panel.querySelector(cfg.scrollSel);
-        if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        var t = (cfg.listSel && panel.querySelector(cfg.listSel)) || panel.querySelector(cfg.scrollSel);
+        if (t && t.getBoundingClientRect().top < 60) t.scrollIntoView({ behavior: 'smooth', block: 'start' });   // list top is off-screen -> show it; otherwise stay put
     }
     return page;
 };

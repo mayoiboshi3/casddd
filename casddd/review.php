@@ -960,11 +960,18 @@ function openViewModal(data) {
         .map(f => f.trim())
         .filter(f => f.length > 0);
 
+    // App uploads are stored as "uploads/case_xxx.jpg" and live in corn_api/uploads/.
+    // Old web-form uploads are just "1776615485_evidence_1108.png" and live in uploads/.
+    const photoUrl = f => {
+        const name = encodeURIComponent(f.replace(/\\/g, '/').split('/').pop());
+        return (f.indexOf('/') !== -1 ? 'corn_api/uploads/' : 'uploads/') + name;
+    };
+
     if (photoList.length > 0) {
         photoGrid.innerHTML = photoList.map(filename => `
-            <img src="uploads/${filename}" alt="Evidence Photo"
+            <img src="${photoUrl(filename)}" alt="Evidence Photo"
                  style="width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:12px;border:1px solid rgba(16,185,129,0.3);cursor:zoom-in;"
-                 onclick="openLightbox('uploads/${filename}')"
+                 onclick="openLightbox('${photoUrl(filename)}')"
                  onerror="this.style.display='none'"
                  title="Click to enlarge">
         `).join('');
@@ -1057,11 +1064,12 @@ function openViewModal(data) {
     if (_pdl) { _pdl.style.display = 'none'; _pdl.textContent = ''; }
     window._initialStatus   = data.status || 'pending';
     window._initialSeverity = severityHiddenInput.value; // '' when no severity dropdown is shown
+    refreshResolvePill();
     updateSaveButtonState();
 
     // ── Manual disease verification button — Other/Unidentified + Pending only ──
     document.getElementById('view_reassign_disease_wrap').style.display =
-        (isUnidentifiedCase && isPendingCase) ? 'block' : 'none';
+        (isUnidentifiedCase && (isPendingCase || data.status === 'verified')) ? 'block' : 'none';   // pick it while Pending or Verified, before resolving
 
     // Export button — only for verified / resolved cases
     const exportBtn = document.getElementById('view_export_btn');
@@ -1254,9 +1262,24 @@ function updateSaveButtonState() {
 // ── STATUS-CHANGE CONFIRMATION OVERLAY ──
 // "Save Status Update" no longer submits straight away — it opens this overlay
 // first so a reviewer can't move a case from Pending → Verified (etc.) by accident.
+// A report whose disease is still "Other / Unidentified" (or empty) cannot be resolved until a disease is picked.
+function reviewNeedsDiseaseFirst(statusVal) {
+    const data = window._currentViewData || {};
+    const unidentified = (!data.disease_name || data.disease_name === 'Other / Unidentified' || data.disease_name === 'Unidentified');
+    return statusVal === 'resolved' && unidentified
+        && !document.getElementById('view_pending_disease_ids').value;
+}
+
 function reviewShowStatusConfirm() {
     const statusVal = document.getElementById('view_status').value;
     if (!statusVal) { alert('Pick a status first.'); return; }
+
+    if (reviewNeedsDiseaseFirst(statusVal)) {
+        const msg = 'This report is still Unidentified. Identify the disease first, then resolve it.';
+        if (window.casdAlert) { window.casdAlert(msg, { type: 'warning', title: 'Identify the Disease First' }); } else { alert(msg); }
+        if (typeof openDiseasePicker === 'function') { setTimeout(openDiseasePicker, 50); }
+        return;
+    }
 
     // Rejecting a case requires a reason — belt-and-suspenders alongside the
     // disabled save button, in case that state ever goes stale.
@@ -1326,6 +1349,26 @@ function applyStatusFlow(currentStatus) {
         const nextOptions = allowed.filter(s => s !== currentStatus).map(s => STATUS_LABELS[s]).join(' or ');
         hint.textContent = `One-way flow: this case can only advance to ${nextOptions}.`;
     }
+    hint.dataset.base = hint.textContent;
+    refreshResolvePill();
+}
+
+// "Resolved" can't be clicked while the report is still Unidentified. It unlocks only after the disease has been
+// identified AND saved (Save Status Update) -- a disease that is merely picked in the popup does not unlock it.
+function refreshResolvePill() {
+    const pill = document.querySelector('#status_quick_select .status-pill[data-value="resolved"]');
+    if (!pill) return;
+    const cur     = window._currentCaseStatus || 'pending';
+    const allowed = (STATUS_FLOW[cur] || [cur]).includes('resolved');
+    const data    = window._currentViewData || {};
+    const unidentified = (!data.disease_name || data.disease_name === 'Other / Unidentified' || data.disease_name === 'Unidentified');
+    const lock    = allowed && unidentified;
+    pill.classList.toggle('disabled', !allowed || lock);
+    const hint = document.getElementById('status_flow_hint');
+    if (hint && hint.dataset.base !== undefined) {
+        hint.textContent = hint.dataset.base + (lock ? ' Identify the disease and save first to unlock Resolved.' : '');
+    }
+    if (lock && document.getElementById('view_status').value === 'resolved') { selectStatusPill(cur, false); }
 }
 
 // ── TREATMENT INSTRUCTION CHECKLIST ──
