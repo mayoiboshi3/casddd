@@ -17,6 +17,15 @@
 $__cntBase = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
 $__cntFeed = $__cntBase . '/notifications_feed.php';
 $__cntChat = $__cntBase . '/chat_feed.php';
+// One token per login session. If the browser last saw a different token, this is a NEW LOGIN -> one summary pop-up only.
+// (If your logout does not destroy the session, also run  unset($_SESSION['casd_notif_login']);  there.)
+$__cntLogin = '';
+if (session_status() === PHP_SESSION_ACTIVE) {
+    if (empty($_SESSION['casd_notif_login'])) {
+        try { $_SESSION['casd_notif_login'] = bin2hex(random_bytes(8)); } catch (Throwable $e) { $_SESSION['casd_notif_login'] = md5(uniqid('', true)); }
+    }
+    $__cntLogin = (string)$_SESSION['casd_notif_login'];
+}
 ?>
 <style id="cnt-css">
 :root{--cnt-top:20px;--cnt-right:20px}
@@ -73,15 +82,17 @@ $__cntChat = $__cntBase . '/chat_feed.php';
 
     var FEED = <?= json_encode($__cntFeed, JSON_UNESCAPED_SLASHES) ?>;
     var CHAT_FEED = <?= json_encode($__cntChat, JSON_UNESCAPED_SLASHES) ?>;
-    var KEY = 'casd_notif_v2', INTERVAL = 10000, HIDDEN_EVERY = 3, MAX_ITEMS = 100, MAX_TOASTS = 4, TOAST_MS = 12000, HL_MS = 30 * 60 * 1000, SCROLL_KEY = 'casd_notif_scroll';
+    var LOGIN = <?= json_encode($__cntLogin) ?>;
+    var KEY = 'casd_notif_v2', INTERVAL = 10000, HIDDEN_EVERY = 3, MAX_ITEMS = 100, MAX_TOASTS = 4, TOAST_MS = 12000, HL_MS = 7 * 24 * 60 * 60 * 1000, SCROLL_KEY = 'casd_notif_scroll';
     var KINDS = {
         report: { tag: 'Disease report', c: '#f97316', bg: 'rgba(249,115,22,.12)', view: 'disease', p: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
         status: { tag: 'Report update', c: '#3b82f6', bg: 'rgba(59,130,246,.12)', view: 'disease', p: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
         scan:   { tag: 'AI scan',        c: '#8b5cf6', bg: 'rgba(139,92,246,.12)', view: 'scans',   p: 'M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9zM15 13a3 3 0 11-6 0 3 3 0 016 0z' },
-        farm:   { tag: 'Farm report',    c: '#10b981', bg: 'rgba(16,185,129,.12)', view: 'farm',    p: 'M12 21V9m0 0c0-3 2-5 6-5 0 4-2 6-6 6M12 14c0-3-2-5-6-5 0 4 2 6 6 6' }
+        farm:   { tag: 'Farm report',    c: '#10b981', bg: 'rgba(16,185,129,.12)', view: 'farm',    p: 'M12 21V9m0 0c0-3 2-5 6-5 0 4-2 6-6 6M12 14c0-3-2-5-6-5 0 4 2 6 6 6' },
+        digest: { tag: 'Updates',        c: '#f59e0b', bg: 'rgba(245,158,11,.14)', view: 'disease', p: 'M15 17h5l-1.4-1.4A2 2 0 0118 14.2V11a6 6 0 10-12 0v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0a3 3 0 11-6 0m6 0H9' }
     };
 
-    var state = load(), busy = false, ownWriteAt = 0, firstPoll = true, ticks = 0, flash = false;
+    var state = load(), busy = false, ownWriteAt = 0, firstPoll = true, ticks = 0, flash = false, newLogin = false, chatNewLogin = false;
     var baseTitle = document.title.replace(/^(\(\d+\+?\)|\u25CF NEW REPORT|\u25CF NEW MESSAGE|\uD83D\uDCAC \d+)\s*/, '');
     var toasts, badges = [];
     var page = location.pathname.replace(/.*\//, '');
@@ -95,6 +106,12 @@ $__cntChat = $__cntBase . '/chat_feed.php';
     function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
     function safeLink(l) { return /^[\w./?=&%-]+$/.test(l || '') ? l : 'reports.php'; }
     function unreadItems() { return state.items.filter(function (i) { return !i.read; }); }
+    // Red number gone as soon as the person opens Reports (the row highlights are NOT touched -- they stay until clicked).
+    function clearAllUnread() {
+        state = load(); var ch = false;
+        state.items.forEach(function (i) { if (!i.read) { i.read = true; ch = true; } });
+        if (ch) { save(); render(); }
+    }
     function kindView(i) { var k = KINDS[i.kind]; return k ? k.view : null; }
 
     // Go to an item's page. If that is the view already open, reload it so the new report is on screen.
@@ -115,7 +132,7 @@ $__cntChat = $__cntBase . '/chat_feed.php';
     function mountBadges() {
         badges = findReportLinks().map(function (a) {
             if (getComputedStyle(a).position === 'static') a.style.position = 'relative';
-            var b = document.createElement('span'); b.className = 'cnt-badge'; b.hidden = true; a.appendChild(b); return b;
+            var b = document.createElement('span'); b.className = 'cnt-badge'; b.hidden = true; a.appendChild(b); a.addEventListener('click', clearAllUnread); return b;
         });
     }
     function bump() { badges.forEach(function (b) { b.classList.remove('cnt-pop'); void b.offsetWidth; b.classList.add('cnt-pop'); }); }
@@ -157,6 +174,18 @@ $__cntChat = $__cntBase . '/chat_feed.php';
         bump();
         fresh.slice().reverse().forEach(toast);                 // one pop-up per report (oldest first)
     }
+    // ONE pop-up that stands for many updates (new login / catching up after being away)
+    function digestToast(tag, link, title, body) {
+        Array.prototype.forEach.call(document.querySelectorAll('.cnt-toast[data-digest="' + tag + '"]'), function (t) { if (t.parentNode) t.parentNode.removeChild(t); });
+        toast({ id: 'digest:' + tag + ':' + Date.now(), key: '', kind: 'digest', title: title, body: body, link: link, urgent: false });
+        if (toasts.lastChild) toasts.lastChild.setAttribute('data-digest', tag);
+    }
+    function digestFresh(fresh) {
+        var views = {}; fresh.forEach(function (i) { views[kindView(i) || 'disease'] = 1; });
+        var vs = Object.keys(views), link = vs.length === 1 ? 'reports.php?view=' + vs[0] : 'reports.php?view=disease';
+        bump();
+        digestToast('reports', link, 'Several reports have been updated', fresh.length + ' reports are new or updated');
+    }
     function markRead(id) { state.items.forEach(function (i) { if (i.id === id) i.read = true; }); save(); render(); }
 
     // Opening a view on reports.php shows what belongs to it, so those items count as seen -- but only at the
@@ -164,7 +193,7 @@ $__cntChat = $__cntBase . '/chat_feed.php';
     function clearCurrentView() {
         if (!curView) return;
         var changed = false;
-        state.items.forEach(function (i) { if (!i.read && kindView(i) === curView) { i.read = true; changed = true; } });
+        state.items.forEach(function (i) { if (!i.read) { i.read = true; changed = true; } });   // any Reports view: the number goes away, highlights stay
         if (changed) save();
     }
 
@@ -219,6 +248,7 @@ $__cntChat = $__cntBase . '/chat_feed.php';
         if (busy || document.prerendering) return;
         busy = true;
         state = load();                                         // pick up what other tabs already stored
+        if (LOGIN && state.login === LOGIN) newLogin = false;   // another tab already handled this login
         var url = FEED + (state.cursor ? '?after=' + encodeURIComponent(JSON.stringify(state.cursor)) : '');
         fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, cache: 'no-store', credentials: 'same-origin' })
             .then(function (r) { return r.json(); })             // expired session -> login page -> not JSON -> ignored
@@ -234,20 +264,25 @@ $__cntChat = $__cntBase . '/chat_feed.php';
                     if (known[e.id]) return;
                     known[e.id] = 1; state.ids[e.id] = 1;
                     var item = { id: e.id, key: e.key || null, kind: e.kind, title: e.title, body: e.body, link: e.link, urgent: !!e.urgent,
-                                 at: now - (e.ago || 0) * 1000, read: !!d.initial || (mine && e.kind === 'status') };
+                                 at: now - (e.ago || 0) * 1000, read: (!!d.initial && !newLogin) || (mine && e.kind === 'status') };   // new login: even the first 7 days stay unread + highlighted
                     if (e.kind === 'status' && touch[e.key] && (now - touch[e.key]) < 120000) item.read = true;   // same moment as a chat message -> stay quiet
                     item.hl = !item.read;                // quiet / first-load items are not highlighted
                     state.items.push(item);
-                    var onScreen = !item.read && curView && !document.hidden && kindView(item) === curView;
+                    var onScreen = !item.read && curView && !document.hidden;
                     if (!item.read) fresh.push(item);            // every NEW report alerts, even one the person added
-                    if (onScreen) item.read = true;              // ...but if its page is open in front of you, the red number never appears (the row highlight stays)
+                    if (onScreen) item.read = true;              // ...but while Reports is open in front of you, the red number never appears (the row highlight stays)
                 });
                 state.items.sort(function (a, b) { return b.at - a.at; });
                 state.items = state.items.slice(0, MAX_ITEMS);
                 state.cursor = d.cursor;
                 var idKeys = Object.keys(state.ids); if (idKeys.length > 1500) { idKeys.slice(0, idKeys.length - 1000).forEach(function (k) { delete state.ids[k]; }); }
+                var wasFirst = firstPoll, wasNewLogin = newLogin;
                 if (firstPoll) { firstPoll = false; clearCurrentView(); }
-                save(); render(); highlightRows(); announce(fresh);
+                if (LOGIN) state.login = LOGIN;
+                newLogin = false;
+                save(); render(); highlightRows();
+                // new login / first check on this page: any number of updates -> ONE pop-up. Live trickle: individual pop-ups, but a burst of 4+ is also merged.
+                if (fresh.length > ((wasNewLogin || wasFirst) ? 1 : 3)) digestFresh(fresh); else announce(fresh);
             })
             .catch(function (err) { console.warn('[notifications] could not reach ' + FEED + ' (' + err + '). Check the file is in the same folder as reports.php.'); })
             .finally(function () { busy = false; });
@@ -343,6 +378,7 @@ $__cntChat = $__cntBase . '/chat_feed.php';
             .then(function (d) {
                 if (!d || !d.ok || !Array.isArray(d.chats)) { console.warn('[notifications] chat feed not OK. Open ' + CHAT_FEED + ' in the browser.'); return; }
                 cstate = chatLoad();                               // newest stored state (other tabs may have just announced)
+                if (LOGIN && cstate.login === LOGIN) chatNewLogin = false;
                 var first = !cstate.init, alerts = [];
                 d.chats.forEach(function (c) {
                     var prev = cstate.seen[c.key];
@@ -360,9 +396,13 @@ $__cntChat = $__cntBase . '/chat_feed.php';
                     }
                 });
                 cstate.init = true;
+                var wasCNew = chatNewLogin; if (LOGIN) cstate.login = LOGIN; chatNewLogin = false;
                 var tk = cstate.touch || {}; Object.keys(tk).forEach(function (k) { if (Date.now() - tk[k] > 600000) delete tk[k]; });
                 chatSave(); render();
-                if (alerts.length) { bump(); alerts.forEach(chatToast); }
+                if (alerts.length > (wasCNew ? 1 : 3)) {                        // several chats at once -> one pop-up
+                    var tot = 0; alerts.forEach(function (a) { tot += a.n; });
+                    bump(); digestToast('chats', 'reports.php?view=disease', 'Several chats have new messages', tot + ' new farmer messages');
+                } else if (alerts.length) { bump(); alerts.forEach(chatToast); }
             })
             .catch(function (err) { console.warn('[notifications] could not reach ' + CHAT_FEED + ' (' + err + '). Put chat_feed.php in the same folder as reports.php.'); })
             .finally(function () { chatBusy = false; });
@@ -402,6 +442,7 @@ $__cntChat = $__cntBase . '/chat_feed.php';
 
     function start() {
         toasts = document.createElement('div'); toasts.className = 'cnt-toasts'; document.body.appendChild(toasts);
+        newLogin = !!LOGIN && state.login !== LOGIN; chatNewLogin = !!LOGIN && cstate.login !== LOGIN;
         mountBadges(); watchRows();
         clearCurrentView(); render(); poll();                   // stored unread items for the view being opened count as seen
         setInterval(tick, INTERVAL);
