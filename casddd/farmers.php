@@ -103,18 +103,6 @@ $errMsg  = htmlspecialchars($_GET['error']   ?? '');
 .st-rejected{background:#fef2f2;color:#dc2626}
 .st-resolved{background:#eff6ff;color:#1d4ed8}
 
-/* ── Report detail: chat with farmer ─────────────────── */
-.chat-thread{max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
-.chat-row{display:flex;flex-direction:column;max-width:85%}
-.chat-row.staff{align-self:flex-end;align-items:flex-end;margin-left:auto}
-.chat-row.farmer{align-self:flex-start;align-items:flex-start;margin-right:auto}
-.chat-bubble{padding:9px 13px;border-radius:16px;font-size:12px;font-weight:700;line-height:1.5;white-space:pre-wrap;word-wrap:break-word}
-.chat-bubble.staff{background:#064e3b;color:#fff;border-bottom-right-radius:4px}
-.chat-bubble.farmer{background:#eef2f7;color:#334155;border-bottom-left-radius:4px}
-.chat-meta{font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.08em;margin-top:3px;color:#94a3b8}
-#rd_chat_input{transition:all .2s}
-#rd_chat_input:focus{border-color:#10b981;background:#fff}
-#rd_chat_send_btn:disabled{opacity:.4;cursor:not-allowed}
 </style>
 
 <!-- ══ TOAST ══════════════════════════════════════════════════ -->
@@ -254,6 +242,7 @@ window.addEventListener('DOMContentLoaded',()=>{
                 $gender = $row['gender'] ?? '';
                 $status = $row['status'] ?? 'active';
                 $modal_data = [
+                    'farmer_id'      => $row['farmer_id'],
                     'farmer_name'    => $row['farmer_name'],
                     'contact_number' => $row['contact_number'],
                     'age'            => $row['age'],
@@ -648,20 +637,16 @@ window.addEventListener('DOMContentLoaded',()=>{
 
             <div>
                 <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">&#128172; Message Farmer</p>
-                <div id="rd_chat_thread" class="chat-thread bg-slate-50 rounded-xl p-3 border border-slate-100"></div>
-                <div id="rd_chat_empty" class="hidden text-center py-6 text-[10px] font-black text-slate-300 uppercase tracking-widest bg-slate-50 rounded-xl border border-slate-100">No messages yet</div>
+                <a id="rd_chat_link" href="reports.php" target="_blank" rel="noopener"
+                   class="flex items-center justify-between gap-3 w-full rounded-2xl bg-slate-50 hover:bg-emerald-50 border border-slate-100 hover:border-emerald-200 px-4 py-3 transition-all">
+                    <span class="text-[10px] font-black text-slate-600 uppercase tracking-widest">Open this case's chat in Reports</span>
+                    <span id="rd_chat_count" class="text-[9px] font-black text-slate-400 uppercase tracking-widest whitespace-nowrap"></span>
+                </a>
             </div>
 
         </div>
 
         <div class="border-t border-slate-100 flex-shrink-0">
-            <div class="px-6 pt-4 flex items-end gap-2">
-                <textarea id="rd_chat_input" rows="1" oninput="autoGrowChatBox(this)" onkeydown="handleChatKeydown(event)"
-                    placeholder="Type a message to the farmer…"
-                    class="flex-1 resize-none max-h-28 rounded-2xl bg-slate-50 border-2 border-transparent outline-none px-4 py-3 text-xs font-bold text-slate-700"></textarea>
-                <button type="button" id="rd_chat_send_btn" onclick="sendFarmerChatMessage()" title="Send message"
-                    class="flex-shrink-0 w-11 h-11 rounded-full btn-green text-white flex items-center justify-center shadow-lg text-base">&#10148;</button>
-            </div>
             <div class="px-6 py-4">
                 <button onclick="closeReportDetail()" class="w-full btn-dark text-white py-3 rounded-2xl font-black text-[9px] uppercase tracking-widest">Close</button>
             </div>
@@ -747,9 +732,17 @@ function openUpdateModal(data) {
     setUpdView();
 
     _currentModalFarmerName = data.farmer_name;
+    _currentModalFarmerId   = data.farmer_id || null;
     _currentModalFarmerPhoto = data.profile_farmers || null;
     _reportsLoaded = false;
+    _reportsLoading = false;
+    // Clear the previous farmer's count so it never carries over, then load this farmer's
+    // reports in the background so the History Reports number is correct before the tab is clicked.
+    const rptBadgeEl = document.getElementById('rptBadge');
+    rptBadgeEl.textContent = '0';
+    rptBadgeEl.classList.add('hidden');
     switchModalTab('info');
+    loadFarmerReports(_currentModalFarmerName, _currentModalFarmerId);
 
     const img = data.profile_farmers ? 'uploads/' + data.profile_farmers : 'assets/default-user.png';
     document.getElementById('upd_photo_preview').src = img;
@@ -1054,6 +1047,9 @@ function previewEnrollImg(input, targetId) {
 let _currentModalFarmerName = null;
 let _currentModalFarmerPhoto = null;
 let _reportsLoaded = false;
+let _reportsLoading = false;
+let _currentModalFarmerId = null;
+let _rptReqId = 0;   // lets a slow answer for a previous farmer be ignored
 
 function switchModalTab(tab) {
     const isInfo = tab === 'info';
@@ -1062,16 +1058,18 @@ function switchModalTab(tab) {
     document.getElementById('tabBtnInfo').classList.toggle('active', isInfo);
     document.getElementById('tabBtnReports').classList.toggle('active', !isInfo);
 
-    if (!isInfo && !_reportsLoaded) {
-        loadFarmerReports(_currentModalFarmerName);
+    if (!isInfo && !_reportsLoaded && !_reportsLoading) {
+        loadFarmerReports(_currentModalFarmerName, _currentModalFarmerId);
     }
 }
 
 /* ═══════════════════════════════════════════════════
    FETCH FARMER REPORTS
 ═══════════════════════════════════════════════════ */
-function loadFarmerReports(farmerName) {
+function loadFarmerReports(farmerName, farmerId) {
+    const reqId = ++_rptReqId;
     _reportsLoaded = false;
+    _reportsLoading = true;
     const list    = document.getElementById('rptList');
     const summary = document.getElementById('rptSummary');
 
@@ -1082,10 +1080,13 @@ function loadFarmerReports(farmerName) {
         </div>`;
     summary.innerHTML = '';
 
-    fetch('get_farmers_reports.php?farmer_name=' + encodeURIComponent(farmerName))
+    fetch('get_farmers_reports.php?farmer_id=' + encodeURIComponent(farmerId || '') +
+          '&farmer_name=' + encodeURIComponent(farmerName || ''))
         .then(r => r.json())
         .then(data => {
+            if (reqId !== _rptReqId) return;   // another farmer was opened meanwhile
             _reportsLoaded = true;
+            _reportsLoading = false;
             if (!data.success) {
                 list.innerHTML = `<div class="py-12 text-center text-rose-500 font-black text-xs uppercase tracking-widest">${data.message || 'Error loading reports.'}</div>`;
                 return;
@@ -1093,6 +1094,8 @@ function loadFarmerReports(farmerName) {
             renderReports(data.reports, data.stats);
         })
         .catch(() => {
+            if (reqId !== _rptReqId) return;
+            _reportsLoading = false;
             list.innerHTML = `<div class="py-12 text-center text-rose-500 font-black text-xs uppercase tracking-widest">Failed to fetch report data.</div>`;
         });
 }
@@ -1138,8 +1141,9 @@ function renderReports(reports, stats) {
         const st   = r.status   || 'pending';
         const pct  = r.infection_percentage ? parseFloat(r.infection_percentage).toFixed(1) + '%' : '—';
         const date = r.report_date ? new Date(r.report_date).toLocaleDateString('en-PH', { year:'numeric', month:'short', day:'numeric' }) : '—';
-        const photoHtml = r.photo_evidence
-            ? `<img src="uploads/${escHtml(r.photo_evidence)}" alt="evidence" class="w-14 h-14 object-cover rounded-xl border-2 border-white shadow-sm flex-shrink-0" onerror="this.style.display='none'">`
+        const photoFiles = casePhotoList(r.photo_evidence);
+        const photoHtml = photoFiles.length
+            ? `<img src="${escHtml(casePhotoUrl(photoFiles[0], r.source))}" alt="evidence" class="w-14 h-14 object-cover rounded-xl border-2 border-white shadow-sm flex-shrink-0" onerror="this.style.display='none'">`
             : '';
         return `
         <div class="rpt-card cursor-pointer hover:border-[#a9c2b5] hover:shadow-md transition-all" onclick="openReportDetail(${idx})">
@@ -1168,6 +1172,23 @@ function renderReports(reports, stats) {
             </div>
         </div>`;
     }).join('');
+}
+
+/* Evidence photos: photo_evidence can hold several comma-separated names.
+   App uploads are stored as "uploads/case_xxx.jpg" and live in corn_api/uploads/;
+   old web-form uploads are just "1776615485_evidence_1108.png" and live in uploads/.
+   AI scan cases (source = 'scan') keep their photos in corn_api/uploads/scan_results/ — the same
+   folder reports.php uses (SCAN_PHOTO_DIR); only the file name from the database is used. */
+const SCAN_PHOTO_DIR = 'corn_api/uploads/scan_results';
+function casePhotoList(value) {
+    return String(value || '').split(',').map(f => f.trim()).filter(f => f.length > 0);
+}
+function casePhotoUrl(f, source) {
+    const name = encodeURIComponent(f.replace(/\\/g, '/').split('/').pop());
+    if (source === 'scan' || f.indexOf('scan_results') !== -1) {
+        return SCAN_PHOTO_DIR.replace(/\/+$/, '') + '/' + name;
+    }
+    return (f.indexOf('/') !== -1 ? 'corn_api/uploads/' : 'uploads/') + name;
 }
 
 function escHtml(str) {
@@ -1216,8 +1237,17 @@ function openReportDetail(idx) {
     }
 
     const photoWrap = document.getElementById('rd_photo_wrap');
-    if (r.photo_evidence) {
-        document.getElementById('rd_photo').src = 'uploads/' + escHtml(r.photo_evidence);
+    const detailPhotos = casePhotoList(r.photo_evidence);
+    if (detailPhotos.length) {
+        const photoEl = document.getElementById('rd_photo');
+        let photoIdx = 0;
+        // If a photo can't be loaded, try the next one; hide the box when none load.
+        photoEl.onerror = function () {
+            photoIdx++;
+            if (photoIdx < detailPhotos.length) { photoEl.src = casePhotoUrl(detailPhotos[photoIdx], r.source); }
+            else { photoWrap.classList.add('hidden'); }
+        };
+        photoEl.src = casePhotoUrl(detailPhotos[0], r.source);
         photoWrap.classList.remove('hidden');
     } else {
         photoWrap.classList.add('hidden');
@@ -1242,101 +1272,16 @@ function openReportDetail(idx) {
     setOptional('rd_treat_wrap',   'rd_treat',   r.treatment_recommendation);
     setOptional('rd_remarks_wrap', 'rd_remarks', r.remarks);
 
-    // ── Chat with farmer ──
-    window._currentChatCaseId = r.case_id;
-    window._currentChatIdx    = idx;
-    renderChatThread(r.messages || []);
-    const chatInput = document.getElementById('rd_chat_input');
-    chatInput.value = '';
-    chatInput.style.height = 'auto';
+    // ── Chat: use the chat in reports.php (no separate chat box here) ──
+    // reports.php opens the case file with ?case_id=...&open_msg=1 and shows the messenger popup.
+    // AI scan cases are sent to the AI Scans view by reports.php itself.
+    const chatLink  = document.getElementById('rd_chat_link');
+    const chatCount = document.getElementById('rd_chat_count');
+    chatLink.href = 'reports.php?view=disease&case_id=' + encodeURIComponent(r.case_id) + '&open_msg=1';
+    const msgN = (r.messages || []).length;
+    chatCount.textContent = msgN + (msgN === 1 ? ' message' : ' messages');
 
     document.getElementById('reportDetailModal').classList.remove('hidden');
-}
-
-/* ═══════════════════════════════════════════════════
-   CHAT WITH FARMER (report detail modal)
-═══════════════════════════════════════════════════ */
-function renderChatThread(messages) {
-    const thread = document.getElementById('rd_chat_thread');
-    const empty  = document.getElementById('rd_chat_empty');
-
-    if (!messages || messages.length === 0) {
-        thread.innerHTML = '';
-        thread.classList.add('hidden');
-        empty.classList.remove('hidden');
-        return;
-    }
-    thread.classList.remove('hidden');
-    empty.classList.add('hidden');
-
-    thread.innerHTML = messages.map(m => {
-        const isFarmer = m.sender === 'farmer';
-        const label = isFarmer ? '👨‍🌾 Farmer' : 'You';
-        const meta  = m.created_at ? `${label} · ${escHtml(m.created_at)}` : label;
-        return `
-        <div class="chat-row ${isFarmer ? 'farmer' : 'staff'}">
-            <div class="chat-bubble ${isFarmer ? 'farmer' : 'staff'}">${escHtml(m.message)}</div>
-            <div class="chat-meta">${meta}</div>
-        </div>`;
-    }).join('');
-
-    thread.scrollTop = thread.scrollHeight;
-}
-
-function handleChatKeydown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendFarmerChatMessage();
-    }
-}
-
-function autoGrowChatBox(el) {
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 112) + 'px';
-}
-
-function sendFarmerChatMessage() {
-    const input   = document.getElementById('rd_chat_input');
-    const sendBtn = document.getElementById('rd_chat_send_btn');
-    const caseId  = window._currentChatCaseId;
-    const text    = input.value.trim();
-
-    if (!text) return;
-    if (!caseId) { showInlineToast('No case selected.', true); return; }
-
-    sendBtn.disabled = true;
-
-    fetch('send_farmer_message.php', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'case_id=' + encodeURIComponent(caseId) + '&message=' + encodeURIComponent(text)
-    })
-    .then(r => r.json())
-    .then(data => {
-        sendBtn.disabled = false;
-        if (!data.success) {
-            showInlineToast(data.message || 'Failed to send message.', true);
-            return;
-        }
-
-        // Clear the compose box now that the send actually succeeded (this is a
-        // plain fetch(), not a form submit + page reload, so this sticks).
-        input.value = '';
-        input.style.height = 'auto';
-
-        // Keep window._rptData in sync so reopening this report without a refetch
-        // still shows the message that was just sent.
-        const idx = window._currentChatIdx;
-        if (window._rptData && window._rptData[idx]) {
-            window._rptData[idx].messages = window._rptData[idx].messages || [];
-            window._rptData[idx].messages.push(data.message_row);
-            renderChatThread(window._rptData[idx].messages);
-        }
-    })
-    .catch(() => {
-        sendBtn.disabled = false;
-        showInlineToast('Failed to send message.', true);
-    });
 }
 
 function closeReportDetail() {

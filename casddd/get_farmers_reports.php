@@ -2,8 +2,8 @@
 /**
  * get_farmer_reports.php
  * AJAX endpoint — returns all disease_cases for a given farmer as JSON.
- * Farmer is now identified by name (stored as [FARMER:name] in description),
- * since the farmers table no longer has a farmer_id primary key.
+ * Farmer is identified by farmer_id (disease_cases.farmer_id). Old rows that only carry
+ * a [FARMER:name] marker in description are still matched as a fallback.
  */
 
 require_once __DIR__ . "/src/db_config.php";
@@ -11,14 +11,25 @@ require_once __DIR__ . "/src/db_config.php";
 header('Content-Type: application/json');
 
 /* ── Validate input ──────────────────────────────── */
+$farmerId   = (int)($_GET['farmer_id'] ?? 0);
 $farmerName = trim($_GET['farmer_name'] ?? '');
 
-if ($farmerName === '') {
-    echo json_encode(['success' => false, 'message' => 'Farmer name is required.']);
+// Only a name was sent (older callers): look the farmer up to get the id.
+if ($farmerId <= 0 && $farmerName !== '') {
+    $lk = $conn->prepare("SELECT farmer_id FROM farmers WHERE farmer_name = ? LIMIT 1");
+    $lk->bind_param('s', $farmerName);
+    $lk->execute();
+    $lkRow = $lk->get_result()->fetch_assoc();
+    $lk->close();
+    if ($lkRow) { $farmerId = (int)$lkRow['farmer_id']; }
+}
+
+if ($farmerId <= 0 && $farmerName === '') {
+    echo json_encode(['success' => false, 'message' => 'Farmer is required.']);
     exit;
 }
 
-/* ── Query disease_cases by [FARMER:name] marker in description ── */
+/* ── Query disease_cases by farmer_id (plus old [FARMER:name] rows as a fallback) ── */
 $stmt = $conn->prepare("
     SELECT
         dc.case_id,
@@ -37,18 +48,22 @@ $stmt = $conn->prepare("
         dc.follow_up_date,
         dc.created_at,
         dc.remarks,
+        dc.source,
         COALESCE(d.disease_name, 'Unknown Disease') AS disease_name,
         d.disease_type,
         d.severity_level AS disease_severity_level
     FROM disease_cases dc
     LEFT JOIN diseases d ON dc.disease_id = d.disease_id
-    WHERE dc.description LIKE ?
+    WHERE dc.farmer_id = ? OR dc.description LIKE ?
     ORDER BY dc.report_date DESC
 ");
 
-// Match the [FARMER:name] prefix stored at the start of description
-$pattern = '[FARMER:' . $farmerName . ']%';
-$stmt->bind_param('s', $pattern);
+// Old-style rows stored "[FARMER:name]" at the start of description. Escape LIKE wildcards in the name.
+// If there is no name, use a pattern that cannot match anything.
+$pattern = $farmerName !== ''
+    ? '[FARMER:' . addcslashes($farmerName, '%_\\') . ']%'
+    : '[FARMER:]__no_match__';
+$stmt->bind_param('is', $farmerId, $pattern);
 $stmt->execute();
 $result = $stmt->get_result();
 

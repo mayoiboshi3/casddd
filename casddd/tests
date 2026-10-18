@@ -1,0 +1,5 @@
+var k='casd_notif_v2', s=JSON.parse(localStorage.getItem(k));
+s.cursor.c=Math.max(0,s.cursor.c-2); s.cursor.f=Math.max(0,s.cursor.f-1); s.items=[];
+localStorage.setItem(k, JSON.stringify(s)); location.reload();
+
+   casdNotifHighlightTest()

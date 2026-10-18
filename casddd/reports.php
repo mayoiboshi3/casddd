@@ -4,8 +4,44 @@
 // away and answer the browser's fetch() with pure JSON. Normal page loads are unaffected.
 ob_start();
 require_once __DIR__ . "/src/db_config.php"; 
+
+// ── DISPLAY-TIME SETTINGS (must be defined BEFORE the message handlers below run) ──
+// Hours from UTC that times are shown in (8 = Philippine time).
+if (!defined('CASD_DISPLAY_UTC_OFFSET_HOURS')) { define('CASD_DISPLAY_UTC_OFFSET_HOURS', 8); }
+// Timezone the FARMER APP uses when it writes the "created_at" inside a reply (hours from UTC). It is 0 (UTC)
+// today. If you later set Philippine time in the farmer app's own database config too, change this to 8.
+if (!defined('CASD_FARMER_APP_UTC_OFFSET_HOURS')) { define('CASD_FARMER_APP_UTC_OFFSET_HOURS', 0); }
+
+// PERFORMANCE: true when the page is being fetched by the in-page filter/tab switcher.
+$isAjax = (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest');
+// PERFORMANCE: on filter/tab requests, skip the page shell (includes/layout.php -> sidebar, header)
+// and everything after the #drPanel block. The login check is NOT skipped: layout.php only does it
+// through src/session_guard.php, which is required directly below. Set to false to go back to the
+// original behaviour.
+$CASD_AJAX_SKIP_LAYOUT = true;
+
+// Folder (relative to this page, or a full URL path) where the AI scan photos are shown from.
+// CHANGE THIS to move the scan photos, e.g. 'uploads/scan_results' or 'scans/images'.
+define('SCAN_PHOTO_DIR', 'corn_api/uploads/scan_results');
 $pageTitle = "Reports"; 
-include "includes/layout.php"; 
+if ($isAjax && $CASD_AJAX_SKIP_LAYOUT) {
+    require_once __DIR__ . "/src/session_guard.php";   // same login check layout.php runs
+} else {
+    include "includes/layout.php";
+}
+
+// ── AUTO-FILL MISSING BARANGAY ON CASES ──────────────────────────────────────
+// Runs on every load of this page (after the login check above). Any disease case whose barangay_id
+// is NULL gets the barangay of the farmer it belongs to (disease_cases.farmer_id -> farmers.barangay_id).
+// updated_at is set to itself so this background fix doesn't change the case's "last updated" time.
+if (isset($conn) && $conn) {
+    mysqli_query($conn, "UPDATE disease_cases dc
+                         INNER JOIN farmers f ON f.farmer_id = dc.farmer_id
+                         SET dc.barangay_id = f.barangay_id,
+                             dc.updated_at  = dc.updated_at
+                         WHERE dc.barangay_id IS NULL
+                           AND f.barangay_id IS NOT NULL");
+}
 
 // ── STYLED DIALOGS (replaces native alert()) ─────────────────────────────────
 // casd_dialog_assets() prints the dialog CSS + JS once. It also overrides window.alert,
@@ -178,28 +214,8 @@ function casd_alert_redirect($type, $title, $message, $url, $autoCloseMs = 0) {
     echo "<script>casdAlert($msg, $payload);</script>";
 }
 
-// --- SELF-HEALING SCHEMA: case_messages table (log of sent recommendations) ---
-// Every recommendation sent becomes one timestamped entry here, instead of
-// overwriting a single "last message" field.
-$tbl_check = mysqli_query($conn, "SHOW TABLES LIKE 'case_messages'");
-if ($tbl_check && mysqli_num_rows($tbl_check) === 0) {
-    mysqli_query($conn, "CREATE TABLE case_messages (
-        message_id INT AUTO_INCREMENT PRIMARY KEY,
-        case_id INT NOT NULL,
-        sender ENUM('staff') NOT NULL DEFAULT 'staff',
-        message_text TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_case_id (case_id)
-    )");
-}
-
-// --- SELF-HEALING SCHEMA: infection_percentage column on disease_cases ---
-// Tracks the infection rate (0-100%) for Common Rust, Northern Leaf Blight,
-// Gray Leaf Spot and Healthy Corn reports, editable only while Pending.
-$col_check = mysqli_query($conn, "SHOW COLUMNS FROM disease_cases LIKE 'infection_percentage'");
-if ($col_check && mysqli_num_rows($col_check) === 0) {
-    mysqli_query($conn, "ALTER TABLE disease_cases ADD COLUMN infection_percentage DECIMAL(5,2) DEFAULT NULL AFTER total_plants");
-}
+// NOTE: the self-healing schema checks (case_messages table, infection_percentage column) were
+// removed for speed. The database must already contain them -- they do after the first load.
 
 // --- REPORT SOURCE: disease_cases.source is 'manual_report' (the default) or 'scan' ---
 // 'scan' = the AI image detector classified the photo. Those cases are listed under AI Scans
@@ -230,6 +246,10 @@ require_once __DIR__ . "/review.php";
 // exposes render_planting_harvesting_section() to draw the section below.
 require_once __DIR__ . "/planting_harvesting.php";
 
+// --- LIVE CHANGE CHECK: signature of the data as of THIS render (the browser compares against it) ---
+require_once __DIR__ . "/reports_poll.php";
+$casdSig = $isAjax ? [] : reports_signature($conn);
+
 // --- ONE-WAY CASE STATUS FLOW: Pending -> Verified -> Resolved ---
 // 'rejected' is only reachable from 'pending' (an early, dead-end exit for
 // invalid/duplicate reports). Once 'resolved' or 'rejected', a case is locked.
@@ -239,6 +259,101 @@ $STATUS_FLOW = [
     'resolved' => ['resolved'],
     'rejected' => ['rejected'],
 ];
+
+// ── Shared helper: fill in the real disease(s) for a Pending "Other / Unidentified" report ──
+// Used by "Save Status Update" (update_case) so nothing is written until the reviewer saves.
+// 1st picked disease reuses this row's disease_id; extra picks (2nd, 3rd) are cloned rows that
+// share the same reference_id, so the report stays ONE file. Columns are read via SHOW COLUMNS
+// so cloning keeps working if disease_cases gains new columns.
+// Returns true if something was applied, false if the case was not eligible / nothing valid picked.
+function casd_reassign_unidentified_disease($conn, $case_id, array $rawIds) {
+    $case_id = (int) $case_id;
+    $new_disease_ids = [];
+    foreach ($rawIds as $rawId) {
+        $id = (int) trim((string) $rawId);
+        if ($id > 0 && $id !== 999 && !in_array($id, $new_disease_ids, true)) {
+            $new_disease_ids[] = $id;
+        }
+    }
+    $new_disease_ids = array_slice($new_disease_ids, 0, 3);   // max 3 diseases
+
+    $cur_q   = mysqli_query($conn, "SELECT * FROM disease_cases WHERE case_id = $case_id LIMIT 1");
+    $cur_row = $cur_q ? mysqli_fetch_assoc($cur_q) : null;
+
+    $isEligible = $cur_row
+        && in_array($cur_row['status'], ['pending', 'verified'], true)   // identify before resolving: allowed while Pending or Verified
+        && in_array((int)($cur_row['disease_id'] ?? 0), [0, 999], true)   // 999 = web form "Other", 0/empty = mobile app with no disease
+        && !empty($new_disease_ids);
+    if (!$isEligible) return false;
+
+    // Only accept ids that really exist in the diseases table
+    $idList = implode(',', $new_disease_ids);
+    $okQ = mysqli_query($conn, "SELECT disease_id FROM diseases WHERE disease_id IN ($idList)");
+    $valid = [];
+    if ($okQ) { while ($r = mysqli_fetch_assoc($okQ)) { $valid[] = (int)$r['disease_id']; } }
+    $new_disease_ids = array_values(array_filter($new_disease_ids, fn($i) => in_array($i, $valid, true)));
+    if (empty($new_disease_ids)) return false;
+
+    $first_disease_id = array_shift($new_disease_ids);
+    mysqli_query($conn, "UPDATE disease_cases SET disease_id = $first_disease_id, updated_at = NOW() WHERE case_id = $case_id");
+
+    if (!empty($new_disease_ids)) {
+        $cols_q = mysqli_query($conn, "SHOW COLUMNS FROM disease_cases");
+        $allCols = [];
+        if ($cols_q) { while ($c = mysqli_fetch_assoc($cols_q)) { $allCols[] = $c['Field']; } }
+        $cloneCols = array_filter($allCols, function ($c) { return $c !== 'case_id'; });
+
+        foreach ($new_disease_ids as $extra_disease_id) {
+            $selectParts = [];
+            foreach ($cloneCols as $c) {
+                if ($c === 'disease_id')      { $selectParts[] = (int)$extra_disease_id . " AS `disease_id`"; }
+                elseif ($c === 'updated_at')  { $selectParts[] = "NOW() AS `updated_at`"; }
+                else                          { $selectParts[] = "`$c`"; }
+            }
+            $insertColsSql = implode(',', array_map(function ($c) { return "`$c`"; }, $cloneCols));
+            $selectSql     = implode(',', $selectParts);
+            mysqli_query($conn, "INSERT INTO disease_cases ($insertColsSql) SELECT $selectSql FROM disease_cases WHERE case_id = $case_id");
+        }
+    }
+    return true;
+}
+
+// ── LIVE MESSAGING HELPERS (used by the review popup's chat; no page reloads) ──
+// casd_json_exit(): throw away the buffered page shell and answer with pure JSON.
+function casd_json_exit(array $payload) {
+    while (ob_get_level() > 0) { ob_end_clean(); }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+// casd_case_chat_state(): the full conversation + the few case fields the chat UI mirrors, plus a
+// signature ("sig") so the browser can ask "anything new?" and get a tiny reply when nothing changed.
+function casd_case_chat_state($conn, $case_id) {
+    $case_id = (int) $case_id;
+    $q   = mysqli_query($conn, "SELECT case_id, status, recommendation_text, recommendation_sent, recommendation_sent_at,
+                                       farmer_reply_text, farmer_reply_at, follow_up_date
+                                FROM disease_cases WHERE case_id = $case_id LIMIT 1");
+    $row = $q ? mysqli_fetch_assoc($q) : null;
+    if (!$row) return null;
+    $state = [
+        'case_id'                => $case_id,
+        'status'                 => $row['status'],
+        'messages'               => buildCaseMessages($conn, $row),
+        'follow_up_date'         => $row['follow_up_date'] ?: null,
+        'recommendation_sent'    => (int) $row['recommendation_sent'],
+        'recommendation_sent_at' => casd_ph_time($conn, $row['recommendation_sent_at']),
+    ];
+    $state['sig'] = md5(json_encode($state, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
+    return $state;
+}
+// Polling endpoint: reports.php?msg_poll=1&case_id=N&sig=LAST_SEEN_SIG
+if ($_SERVER["REQUEST_METHOD"] === "GET" && isset($_GET['msg_poll'])) {
+    $state = casd_case_chat_state($conn, (int) ($_GET['case_id'] ?? 0));
+    if (!$state) { casd_json_exit(['ok' => false, 'error' => 'Case not found.']); }
+    if ($state['sig'] === (string) ($_GET['sig'] ?? '')) { casd_json_exit(['ok' => true, 'changed' => false]); }
+    casd_json_exit(['ok' => true, 'changed' => true] + $state);
+}
 
 // 2. HANDLE DATABASE UPDATE
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
@@ -263,7 +378,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
     // Infection Percentage Rate: that value is read-only here and comes straight
     // from the database (populated elsewhere), never typed in by CASD.
     $severitySql = '';
-    if ($cur_status === 'pending' && (int)($cur_row['disease_id'] ?? 0) === 999
+    // "Unidentified" = disease_id 999 (created in the web form) OR empty (sent from the mobile app with no disease).
+    if ($cur_status === 'pending' && in_array((int)($cur_row['disease_id'] ?? 0), [0, 999], true)
         && isset($_POST['severity_override']) && $_POST['severity_override'] !== '') {
         $validSeverities = ['low', 'moderate', 'high', 'critical'];
         $severity_override = $_POST['severity_override'];
@@ -274,6 +390,29 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
 
     if ($cur_status !== null && $reference_id !== null && in_array($new_status, $allowedNext, true)) {
         $ref_esc = mysqli_real_escape_string($conn, $reference_id);
+
+        // Disease chosen in the picker for an Other / Unidentified report. It is only held in
+        // the modal until now — saved here together with the status + severity, so nothing is
+        // written unless "Save Status Update" is confirmed. (Skipped when rejecting.)
+        $pendingDiseaseIds = trim((string) ($_POST['reassign_disease_ids'] ?? ''));
+        if ($pendingDiseaseIds !== '' && $new_status !== 'rejected') {
+            casd_reassign_unidentified_disease($conn, (int) $case_id, explode(',', $pendingDiseaseIds));
+        }
+
+        // A report that is still "Other / Unidentified" (disease_id 999) or has no disease (0 / empty, from the mobile
+        // app) can NOT be resolved: the disease must be identified first. Checked after the picker's choice above has
+        // been saved, so picking a disease and resolving in the same save still works. (Verifying is not restricted.)
+        if ($new_status === 'resolved') {
+            $chk_q   = mysqli_query($conn, "SELECT disease_id FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
+            $chk_row = $chk_q ? mysqli_fetch_assoc($chk_q) : null;
+            if (!$chk_row || in_array((int)($chk_row['disease_id'] ?? 0), [0, 999], true)) {
+                casd_alert_redirect('warning', 'Identify the Disease First',
+                    "This report is still Unidentified.\nPick the correct disease first, then resolve it.",
+                    'reports.php?view=disease&tab=' . ($cur_status ?? 'verified') . '&case_id=' . (int)$case_id);
+                exit;
+            }
+        }
+
         // WHERE reference_id (not case_id) — every disease row under this report
         // is verified / resolved / rejected together, as one unit.
         // Personnel log: record WHO moved the case, but only when the status really changes
@@ -318,60 +457,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
 // The column list is read from the table itself (SHOW COLUMNS) instead of
 // hard-coded, so this keeps working if disease_cases ever gains new columns.
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['reassign_disease'])) {
+    // Legacy standalone endpoint. The review modal no longer posts here (the disease pick is now
+    // saved together with "Save Status Update" via update_case), but it is kept working.
     $case_id = (int) $_POST['case_id_hidden'];
-
-    // new_disease_id arrives as a single int ("5") or a comma list ("5,7,12")
-    // from the picker — up to 3 diseases. Sanitize: ints only, > 0, not 999
-    // (that's the "Other / Unidentified" placeholder itself), de-duplicated,
-    // capped at 3 even if something upstream ever sends more.
-    $rawIds = explode(',', (string) ($_POST['new_disease_id'] ?? ''));
-    $new_disease_ids = [];
-    foreach ($rawIds as $rawId) {
-        $id = (int) trim($rawId);
-        if ($id > 0 && $id !== 999 && !in_array($id, $new_disease_ids, true)) {
-            $new_disease_ids[] = $id;
-        }
-    }
-    $new_disease_ids = array_slice($new_disease_ids, 0, 3);
-
-    $cur_q   = mysqli_query($conn, "SELECT * FROM disease_cases WHERE case_id = $case_id LIMIT 1");
-    $cur_row = $cur_q ? mysqli_fetch_assoc($cur_q) : null;
-
-    $isEligible = $cur_row
-        && $cur_row['status'] === 'pending'
-        && (int)$cur_row['disease_id'] === 999
-        && !empty($new_disease_ids);
-
-    if ($isEligible) {
-        $first_disease_id = array_shift($new_disease_ids); // reuse this row for pick #1
-        mysqli_query($conn, "UPDATE disease_cases SET disease_id = $first_disease_id, updated_at = NOW() WHERE case_id = $case_id");
-
-        // Any further picks (#2, #3) become their own disease_cases rows,
-        // cloned off the original row so the report stays ONE file (same
-        // reference_id) with several diseases attached to it.
-        if (!empty($new_disease_ids)) {
-            $cols_q = mysqli_query($conn, "SHOW COLUMNS FROM disease_cases");
-            $allCols = [];
-            if ($cols_q) { while ($c = mysqli_fetch_assoc($cols_q)) { $allCols[] = $c['Field']; } }
-            $cloneCols = array_filter($allCols, function ($c) { return $c !== 'case_id'; });
-
-            foreach ($new_disease_ids as $extra_disease_id) {
-                $selectParts = [];
-                foreach ($cloneCols as $c) {
-                    if ($c === 'disease_id') {
-                        $selectParts[] = (int)$extra_disease_id . " AS `disease_id`";
-                    } elseif ($c === 'updated_at') {
-                        $selectParts[] = "NOW() AS `updated_at`";
-                    } else {
-                        $selectParts[] = "`$c`";
-                    }
-                }
-                $insertColsSql = implode(',', array_map(function ($c) { return "`$c`"; }, $cloneCols));
-                $selectSql     = implode(',', $selectParts);
-                mysqli_query($conn, "INSERT INTO disease_cases ($insertColsSql) SELECT $selectSql FROM disease_cases WHERE case_id = $case_id");
-            }
-        }
-
+    if (casd_reassign_unidentified_disease($conn, $case_id, explode(',', (string) ($_POST['new_disease_id'] ?? '')))) {
         echo "<script>window.location='reports.php?view=disease&tab=pending&case_id=" . $case_id . "';</script>";
         exit;
     } else {
@@ -379,6 +468,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['reassign_disease'])) {
         exit;
     }
 }
+
+// (Identifying an "Other" AI scan by hand was removed: scans keep the AI's result.)
 
 // 2b. HANDLE SENDING THE DISEASE RECOMMENDATION TO THE FARMER
 // If the reviewer picked an actual treatment instruction (has_recommendation=1),
@@ -391,6 +482,21 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
     $rec_text        = mysqli_real_escape_string($conn, $_POST['recommendation_text']);
     $tab_return      = mysqli_real_escape_string($conn, $_POST['return_tab'] ?? 'verified');
     $has_rec         = ($_POST['has_recommendation'] ?? '0') === '1';
+    // ajax=1 -> the review popup sent this in the background: answer with JSON instead of reloading the page.
+    $wantsJson       = (($_POST['ajax'] ?? '') === '1');
+    if ($wantsJson && trim((string) ($_POST['recommendation_text'] ?? '')) === '') {
+        casd_json_exit(['ok' => false, 'error' => 'The message is empty.']);
+    }
+    // A Resolved case is read-only: its conversation can be viewed, but nothing more can be sent
+    // (messages, treatment recommendations, or inspection schedule / cancel notices). Enforced here
+    // as well as in the UI so it can't be bypassed.
+    $st_q   = mysqli_query($conn, "SELECT status FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
+    $st_row = $st_q ? mysqli_fetch_assoc($st_q) : null;
+    if ($st_row && $st_row['status'] === 'resolved') {
+        if ($wantsJson) { casd_json_exit(['ok' => false, 'error' => 'This case is resolved — messages can no longer be sent.']); }
+        casd_alert_redirect('warning', 'Case Resolved', 'This case is resolved. The conversation is read-only.', 'reports.php?view=disease&tab=resolved&case_id=' . $case_id);
+        exit;
+    }
 
     // Field Inspection scheduling — review.php's pinned scheduler posts these two
     // hidden fields alongside every recommendation send:
@@ -436,7 +542,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
                 }
                 if (empty($diseaseBlocks)) { $diseaseBlocks[] = "🌽 Hindi tiyak\nWalang detalyadong paglalarawan para sa sakit na ito."; }
 
-                $caseDesc = trim(stripFarmerMarker($findings_row['description'] ?? ''));
+                $caseDesc = trim($findings_row['description'] ?? '');
                 if ($caseDesc === '') { $caseDesc = 'Walang detalyadong obserbasyon.'; }
 
                 $findingsHeader = count($diseaseBlocks) > 1 ? "Natukoy na mga Sakit:\n\n" : "Natukoy na Sakit:\n\n";
@@ -445,23 +551,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
                 mysqli_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$findingsMsg')");
             }
         }
-        mysqli_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$rec_text')");
+        $msgOk = mysqli_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$rec_text')");
+        if ($wantsJson) {
+            $state = casd_case_chat_state($conn, (int) $case_id);
+            casd_json_exit(($msgOk && $state) ? ['ok' => true] + $state : ['ok' => false, 'error' => 'The message could not be saved.']);
+        }
         echo "<script>window.location='reports.php?view=disease&tab=" . $tab_return . "&case_id=" . $case_id . "&open_msg=1';</script>";
         exit;
     }
-}
-
-// Helper: extract farmer name from description field
-function extractFarmerName($description) {
-    if (preg_match('/^\[FARMER:(.+?)\]\n?/s', $description ?? '', $m)) {
-        return trim($m[1]);
-    }
-    return null;
-}
-
-// Helper: strip farmer marker from description for display
-function stripFarmerMarker($description) {
-    return preg_replace('/^\[FARMER:.+?\]\n?/s', '', $description ?? '');
+    if ($wantsJson) { casd_json_exit(['ok' => false, 'error' => 'The message could not be saved.']); }
 }
 
 // Helper: combine a case report's per-disease rows (name, description, treatment,
@@ -526,10 +624,32 @@ function diseaseRowSlice($row) {
     ];
 }
 
+// PERFORMANCE: one query loads the messages for every case in the list, instead of one query per row.
+$GLOBALS['__casdMsgCache'] = [];
+function preloadCaseMessages($conn, array $caseIds) {
+    $ids = array_values(array_unique(array_filter(array_map('intval', $caseIds))));
+    if (!$ids) return;
+    foreach ($ids as $id) { $GLOBALS['__casdMsgCache'][$id] = []; }
+    $q = mysqli_query($conn, "SELECT case_id, sender, message_text, created_at
+                              FROM case_messages
+                              WHERE case_id IN (" . implode(',', $ids) . ")
+                              ORDER BY created_at ASC, message_id ASC");
+    if ($q) {
+        while ($r = mysqli_fetch_assoc($q)) {
+            $GLOBALS['__casdMsgCache'][(int)$r['case_id']][] = [
+                'sender'     => $r['sender'],
+                'message'    => $r['message_text'],
+                'created_at' => $r['created_at'],
+            ];
+        }
+    }
+}
+
 // Helper: load every logged message for a case, oldest first (the chat thread)
 function fetchCaseMessages($conn, $case_id) {
     $messages = [];
     $case_id  = (int)$case_id;
+    if (isset($GLOBALS['__casdMsgCache'][$case_id])) { return $GLOBALS['__casdMsgCache'][$case_id]; }
     $q = mysqli_query($conn, "SELECT sender, message_text, created_at FROM case_messages WHERE case_id = $case_id ORDER BY created_at ASC, message_id ASC");
     if ($q) {
         while ($r = mysqli_fetch_assoc($q)) {
@@ -543,6 +663,38 @@ function fetchCaseMessages($conn, $case_id) {
     return $messages;
 }
 
+// ── PHILIPPINE TIME FOR DISPLAY ──
+// The database server stamps rows (NOW() / CURRENT_TIMESTAMP) in ITS own timezone — UTC here, which is why a
+// message sent at 12:22 PM in the Philippines showed as 04:22. The farmer app's replies are stamped by the same
+// server. These helpers convert such "database time" strings to Asia/Manila (UTC+8) when they are SHOWN.
+// Nothing stored in the database is changed. The database's offset is detected automatically
+// (so it still works if the server timezone is ever changed); set CASD_DISPLAY_UTC_OFFSET_HOURS to use another zone.
+// (CASD_DISPLAY_UTC_OFFSET_HOURS and CASD_FARMER_APP_UTC_OFFSET_HOURS are defined at the top of this file,
+//  because the message handlers further up use these helpers before this point is reached.)
+function casd_db_utc_offset_seconds($conn) {
+    static $off = null;
+    if ($off === null) {
+        $off = 0;
+        $q = mysqli_query($conn, "SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()) AS off_s");
+        if ($q && ($r = mysqli_fetch_assoc($q))) { $off = (int) $r['off_s']; }
+        $off = (int) (round($off / 900) * 900);   // snap to 15 minutes (absorbs the tiny gap between the two clocks)
+    }
+    return $off;
+}
+function casd_ph_time($conn, $str, $srcOffsetSeconds = null) {   // $srcOffsetSeconds: the string's own offset from UTC; null = the database's
+    if ($str === null || $str === '') { return $str; }
+    try {
+        $dt = new DateTime((string) $str, new DateTimeZone('UTC'));
+    } catch (Exception $e) {
+        return $str;   // not a date — leave untouched
+    }
+    $ts = $dt->getTimestamp();
+    // A string with an explicit zone ("...Z", "+08:00") is already an exact moment; a plain
+    // "2026-10-07 04:22:23" is database-local time and must first be taken back to UTC.
+    if (!preg_match('/(Z|[+-]\d{2}:?\d{2})\s*$/i', (string) $str)) { $ts -= ($srcOffsetSeconds === null ? casd_db_utc_offset_seconds($conn) : (int) $srcOffsetSeconds); }
+    return gmdate('Y-m-d H:i:s', $ts + (CASD_DISPLAY_UTC_OFFSET_HOURS * 3600));
+}
+
 // Helper: build the sent-recommendations list for a case row, falling back to the
 // older single recommendation_text column for cases sent before case_messages existed.
 // Also folds in the farmer's reply (disease_cases.farmer_reply_text / farmer_reply_at,
@@ -550,20 +702,52 @@ function fetchCaseMessages($conn, $case_id) {
 // order alongside the staff messages so the thread reads like a real conversation.
 function buildCaseMessages($conn, $row) {
     $messages = fetchCaseMessages($conn, $row['case_id']);
+    // Every message time is converted to Philippine time right here, from the timezone of where it came from.
+    foreach ($messages as &$__m0) { $__m0['created_at'] = casd_ph_time($conn, $__m0['created_at'] ?? null); }
+    unset($__m0);
     if (empty($messages) && !empty($row['recommendation_text'])) {
         $messages[] = [
             'sender'     => 'staff',
             'message'    => $row['recommendation_text'],
-            'created_at' => $row['recommendation_sent_at'] ?? null,
+            'created_at' => casd_ph_time($conn, $row['recommendation_sent_at'] ?? null),
         ];
     }
 
     if (!empty($row['farmer_reply_text'])) {
-        $messages[] = [
-            'sender'     => 'farmer',
-            'message'    => $row['farmer_reply_text'],
-            'created_at' => $row['farmer_reply_at'] ?? null,
-        ];
+        // The farmer app keeps ALL replies in this one column as a JSON list, e.g.
+        //   [{"message":"hello","created_at":"2026-10-07 04:22:23"}, ...]
+        // Show each entry as its own chat bubble with its own time. Older plain-text replies still work.
+        $rawReply = trim((string) $row['farmer_reply_text']);
+        $decoded  = null;
+        if ($rawReply !== '' && ($rawReply[0] === '[' || $rawReply[0] === '{')) {
+            $j = json_decode($rawReply, true);
+            if (is_array($j)) { $decoded = $j; }
+        }
+        if ($decoded !== null) {
+            if (isset($decoded['message'])) { $decoded = [$decoded]; }   // a single {"message":...} object
+            foreach ($decoded as $item) {
+                if (is_array($item)) {
+                    $text = isset($item['message']) ? trim((string) $item['message']) : '';
+                    // The time written inside the reply comes from the farmer app (its own timezone);
+                    // the farmer_reply_at column is a database TIMESTAMP (shown in the database's zone).
+                    $when = !empty($item['created_at'])
+                        ? casd_ph_time($conn, $item['created_at'], CASD_FARMER_APP_UTC_OFFSET_HOURS * 3600)
+                        : casd_ph_time($conn, $row['farmer_reply_at'] ?? null);
+                } else {
+                    $text = trim((string) $item);
+                    $when = casd_ph_time($conn, $row['farmer_reply_at'] ?? null);
+                }
+                if ($text !== '') {
+                    $messages[] = ['sender' => 'farmer', 'message' => $text, 'created_at' => $when];
+                }
+            }
+        } else {
+            $messages[] = [
+                'sender'     => 'farmer',
+                'message'    => $row['farmer_reply_text'],
+                'created_at' => casd_ph_time($conn, $row['farmer_reply_at'] ?? null),
+            ];
+        }
     }
 
     usort($messages, function ($a, $b) {
@@ -576,11 +760,15 @@ function buildCaseMessages($conn, $row) {
 }
 
 // 3. STATS CALCULATION
-$stats_query = mysqli_query($conn, "SELECT COUNT(*) as total, 
-    COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending, 
-    COUNT(CASE WHEN status = 'verified' THEN 1 END) as verified, 
-    COUNT(CASE WHEN status = 'resolved' THEN 1 END) as resolved, 
-    COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected FROM disease_cases WHERE $manualOnlySql");
+// Counts REPORTS, not database rows: a report with 2-3 diseases selected is several disease_cases rows
+// sharing one reference_id, and the list below shows it as ONE file — so the tab numbers count distinct
+// reference_ids (same key the list groups by) or they would be higher than the rows you can see.
+$refKeySql = "COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))";
+$stats_query = mysqli_query($conn, "SELECT COUNT(DISTINCT $refKeySql) as total,
+    COUNT(DISTINCT CASE WHEN status = 'pending'  THEN $refKeySql END) as pending,
+    COUNT(DISTINCT CASE WHEN status = 'verified' THEN $refKeySql END) as verified,
+    COUNT(DISTINCT CASE WHEN status = 'resolved' THEN $refKeySql END) as resolved,
+    COUNT(DISTINCT CASE WHEN status = 'rejected' THEN $refKeySql END) as rejected FROM disease_cases WHERE $manualOnlySql");
 $stats     = mysqli_fetch_assoc($stats_query);
 
 // AI scans are counted on their own and never mixed into the report numbers above.
@@ -659,12 +847,12 @@ if ($autoOpenCaseId) {
         $ao_q = mysqli_query($conn, "SELECT dc.*, b.name AS brgy_name, d.disease_name,
             d.description AS disease_description,
             d.recommended_treatment, d.prevention_measures,
-            f.profile_farmers AS farmer_photo,
+            f.profile_farmers AS farmer_photo, f.farmer_name AS farmer_name_db,
             " . personnel_log_select_sql() . "
             FROM disease_cases dc
             LEFT JOIN barangays b  ON dc.barangay_id = b.id
             LEFT JOIN diseases d   ON dc.disease_id  = d.disease_id
-            LEFT JOIN farmers f    ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
+            LEFT JOIN farmers f    ON f.farmer_id = dc.farmer_id
             " . personnel_log_join_sql() . "
             WHERE dc.reference_id = '$ao_ref'
             ORDER BY dc.case_id ASC");
@@ -677,8 +865,8 @@ if ($autoOpenCaseId) {
             $ao_combined = combineDiseaseFields($ao_diseases);
 
             $autoOpenData = $ao_primary;
-            $autoOpenData['resolved_farmer_name'] = extractFarmerName($ao_primary['description']) ?? '— Unassigned —';
-            $autoOpenData['clean_description']    = stripFarmerMarker($ao_primary['description']);
+            $autoOpenData['resolved_farmer_name'] = !empty($ao_primary['farmer_name_db']) ? $ao_primary['farmer_name_db'] : '— Unassigned —';
+            $autoOpenData['clean_description']    = $ao_primary['description'] ?? '';
             $autoOpenData['messages']             = buildCaseMessages($conn, $ao_primary);
             $autoOpenData['disease_name']         = $ao_combined['name'];
             $autoOpenData['disease_description']  = $ao_combined['description'];
@@ -846,8 +1034,8 @@ $tableRows = [];
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 16px;
-        padding: 16px 24px;
+        gap: 14px;
+        padding: 9px 20px;          /* compact: a full page of 10 rows + the page buttons fits on one screen */
         cursor: pointer;
         transition: background .15s ease;
     }
@@ -867,6 +1055,19 @@ $tableRows = [];
         padding: 56px 24px;
         color: #9ca3af;
     }
+
+    /* ── Pagination for the Disease Reports list (10 reports per page) ── */
+    .dr-pager { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 12px; padding:10px 20px; border-top:1px solid #f3f4f6;
+                position:static; background:#fff; }
+    #drList, #scanList { scroll-margin-top:90px; }
+    .dr-pager.hidden { display:none; }
+    .dr-pager-info { font-size:11px; font-weight:700; color:#9ca3af; text-transform:uppercase; letter-spacing:.05em; }
+    .dr-pager-btns { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+    .dr-pager-btn { min-width:34px; height:34px; padding:0 10px; border:1px solid #e5e7eb; background:#fff; color:#4b5563; border-radius:10px; font-size:11px; font-weight:800; cursor:pointer; transition:background .15s ease,color .15s ease,border-color .15s ease; }
+    .dr-pager-btn:hover:not(:disabled):not(.active) { background:#f3f4f6; color:#111827; }
+    .dr-pager-btn.active { background:#111827; border-color:#111827; color:#fff; cursor:default; }
+    .dr-pager-btn:disabled { opacity:.4; cursor:not-allowed; }
+    .dr-pager-dots { padding:0 4px; color:#9ca3af; font-weight:800; }
 
     /* ── Smooth hover feedback for filter inputs and action buttons ── */
     .filter-input {
@@ -910,6 +1111,8 @@ $tableRows = [];
     /* Visually mark out-of-range dates */
     input[type="date"]:out-of-range { border-color: #fca5a5; background: #fff1f2; }
 
+    .dr-status-pill { display:none; }
+    #drPanel[data-tab="all"] .dr-status-pill { display:inline-block; }
     .sev-badge { display:inline-block; font-size:0.58rem; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; padding:2px 8px; border-radius:999px; margin-top:3px; }
     .sev-low      { background:#d1fae5; color:#065f46; }
     .sev-moderate { background:#fef3c7; color:#92400e; }
@@ -931,7 +1134,82 @@ $tableRows = [];
        and the reportPopIn animation they use) now lives in review.php,
        rendered by render_review_modal(). */
 </style>
-<?php casd_dialog_assets(); ?>
+
+<script>
+/* ── Shared pagination helper (10 per page) — used by Disease Reports and AI Scans.
+   Works on rows already in the DOM, so search keeps covering every page, and the list box keeps a
+   fixed height (10 rows tall) so it never shrinks on short pages. Reusable for any other list:
+   casePaginate({ panel, rowSel, inputSel, emptySel, pagerSel, listSel, page, scroll }) ── */
+window.CASE_PAGE_SIZE = 10;
+window.casePaginate = function (cfg) {
+    var size  = window.CASE_PAGE_SIZE;
+    var panel = cfg.panel;
+    if (!panel) return;
+    var input = cfg.inputSel ? panel.querySelector(cfg.inputSel) : null;
+    var term  = ((input && input.value) || '').trim().toLowerCase();
+    var list  = cfg.listSel ? panel.querySelector(cfg.listSel) : null;
+    var rows  = panel.querySelectorAll(cfg.rowSel);
+
+    var matched = [];
+    rows.forEach(function (row) {
+        var inTab = !cfg.rowFilter || cfg.rowFilter(row);   // e.g. the active Pending/Verified/... tab
+        var ok = inTab && (!term || (row.dataset.search || '').indexOf(term) !== -1);
+        if (ok) matched.push(row); else row.style.display = 'none';
+    });
+
+    var total = matched.length;
+    var pages = Math.max(1, Math.ceil(total / size));
+    var page  = Math.min(Math.max(1, cfg.page || 1), pages);
+    var start = (page - 1) * size, end = start + size;
+    matched.forEach(function (row, i) {
+        row.style.display = (i >= start && i < end) ? '' : 'none';
+    });
+
+    // Fixed list height: 10 rows' worth, measured from the real rows (kept at the tallest seen).
+    if (list) {
+        var h = 0;
+        matched.slice(start, end).forEach(function (row) {
+            h = Math.max(h, row.getBoundingClientRect().height + 1);
+        });
+        var prev = parseFloat(list.dataset.rowH || '0');
+        if (h > prev) { list.dataset.rowH = String(h); prev = h; }
+        if (prev > 0) list.style.minHeight = Math.ceil(prev * size) + 'px';
+    }
+
+    var emptyEl = cfg.emptySel ? panel.querySelector(cfg.emptySel) : null;
+    if (emptyEl) emptyEl.classList.toggle('hidden', !(term && total === 0));
+
+    var pager = panel.querySelector(cfg.pagerSel);
+    if (!pager) return page;
+    if (total <= size) { pager.classList.add('hidden'); pager.innerHTML = ''; return page; }
+    pager.classList.remove('hidden');
+
+    var nums = [], last = 0;
+    for (var n = 1; n <= pages; n++) {
+        if (n === 1 || n === pages || Math.abs(n - page) <= 1) {
+            if (last && n - last > 1) nums.push('…');
+            nums.push(n); last = n;
+        }
+    }
+    var html = '<div class="dr-pager-info">Showing ' + (start + 1) + '–' + Math.min(end, total) + ' of ' + total + ' ' + (cfg.noun || 'reports') + '</div>'
+             + '<div class="dr-pager-btns">'
+             + '<button type="button" class="dr-pager-btn" data-page="' + (page - 1) + '"' + (page === 1 ? ' disabled' : '') + '>Prev</button>';
+    nums.forEach(function (p) {
+        html += (p === '…')
+            ? '<span class="dr-pager-dots">…</span>'
+            : '<button type="button" class="dr-pager-btn' + (p === page ? ' active' : '') + '" data-page="' + p + '">' + p + '</button>';
+    });
+    html += '<button type="button" class="dr-pager-btn" data-page="' + (page + 1) + '"' + (page === pages ? ' disabled' : '') + '>Next</button></div>';
+    pager.innerHTML = html;
+
+    if (cfg.scroll && cfg.scrollSel) {
+        var t = (cfg.listSel && panel.querySelector(cfg.listSel)) || panel.querySelector(cfg.scrollSel);
+        if (t && t.getBoundingClientRect().top < 60) t.scrollIntoView({ behavior: 'smooth', block: 'start' });   // list top is off-screen -> show it; otherwise stay put
+    }
+    return page;
+};
+</script>
+<?php if (!$isAjax) { casd_dialog_assets(); } ?>
 
 <!-- ═══ REPORT TYPE SWITCHER ═══
      Always visible at the top, regardless of which view is active. This is the
@@ -944,7 +1222,7 @@ $tableRows = [];
         <div class="w-12 h-12 flex-shrink-0 rounded-2xl flex items-center justify-center text-2xl <?= $view === 'disease' ? 'bg-white/15' : 'bg-emerald-50' ?>">🌽</div>
         <div class="text-left">
             <p class="font-black text-sm uppercase tracking-wide <?= $view === 'disease' ? 'text-white' : 'text-gray-800' ?>">Disease Reports</p>
-            <p class="text-[11px] font-bold <?= $view === 'disease' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$stats['total'] ?> manual &middot; <?= (int)$stats['pending'] ?> awaiting review</p>
+            <p id="cardDiseaseStat" class="text-[11px] font-bold <?= $view === 'disease' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$stats['total'] ?> manual &middot; <?= (int)$stats['pending'] ?> awaiting review</p>
         </div>
     </a>
     <a href="?view=farm" class="btn-intel flex items-center gap-4 p-6 rounded-[1.75rem] border-2 <?= $view === 'farm' ? 'bg-emerald-600 border-emerald-600 shadow-lg' : 'bg-white border-gray-100 hover:border-emerald-200' ?>">
@@ -958,7 +1236,7 @@ $tableRows = [];
         <div class="w-12 h-12 flex-shrink-0 rounded-2xl flex items-center justify-center text-2xl <?= $view === 'scans' ? 'bg-white/15' : 'bg-emerald-50' ?>">&#128247;</div>
         <div class="text-left">
             <p class="font-black text-sm uppercase tracking-wide <?= $view === 'scans' ? 'text-white' : 'text-gray-800' ?>">AI Scans</p>
-            <p class="text-[11px] font-bold <?= $view === 'scans' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$scanStats['total'] ?> scanned &middot; <?= (int)$scanStats['week'] ?> this week</p>
+            <p id="cardScanStat" class="text-[11px] font-bold <?= $view === 'scans' ? 'text-white/80' : 'text-gray-400' ?>"><?= (int)$scanStats['total'] ?> scanned &middot; <?= (int)$scanStats['week'] ?> this week</p>
         </div>
     </a>
 </div>
@@ -976,7 +1254,7 @@ $tableRows = [];
 </div>
 <?php endif; ?>
 
-<?php render_new_case_report_modal($conn, $today, $minDate); ?>
+<?php if (!$isAjax) { render_new_case_report_modal($conn, $today, $minDate); } /* already on the page; skips 4 queries per filter change */ ?>
 
 <!-- ═══ CASE FILE LIST ═══ -->
 <div class="bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl">
@@ -1002,8 +1280,8 @@ $tableRows = [];
     <!-- ── AJAX panel: tabs + filters + case list. Swapped in place via JS
          (see bottom of file) instead of a full page navigation, so switching
          between Pending / Verified / Resolved doesn't reload the page. ── -->
-    <?php render_case_calendar_assets(); ?>
-    <div id="drPanel">
+    <?php if (!$isAjax) { render_case_calendar_assets(); } ?>
+    <div id="drPanel" data-tab="<?= htmlspecialchars($activeTab) ?>">
 
     <!-- ── Tabs: same browser-tab look as the Farm Reports section ── -->
     <div class="dr-tabs-wrap">
@@ -1025,7 +1303,7 @@ $tableRows = [];
                 $isActive   = ($activeTab === $tab);
                 $activeClass = $isActive ? 'dr-tab dr-tab-active' : 'dr-tab';
             ?>
-                <a href="?tab=<?= $tab ?><?= $tabQueryExtra ?>" class="<?= $activeClass ?>">
+                <a href="?tab=<?= $tab ?><?= $tabQueryExtra ?>" class="<?= $activeClass ?>" data-dr-tab="<?= $tab ?>">
                     <?= $cfg['label'] ?> <span class="dr-tab-count"><?= $cfg['count'] ?></span>
                 </a>
             <?php endforeach; ?>
@@ -1073,7 +1351,7 @@ $tableRows = [];
                     Filter
                 </button>
                 <?php if ($filterBarangayId || $filterDateFrom || $filterDateTo): ?>
-                <a href="?tab=<?= htmlspecialchars($activeTab) ?>"
+                <a href="?tab=<?= htmlspecialchars($activeTab) ?>" id="drClearLink"
                     class="text-[10px] font-black text-gray-400 hover:text-gray-600 uppercase underline">
                     Clear
                 </a>
@@ -1087,13 +1365,11 @@ $tableRows = [];
             </button>
         </div>
 
-        <?php if ($activeTab === 'verified' || $activeTab === 'resolved'): ?>
-        <button id="exportTabBtn" onclick="exportAllReports()"
+        <button id="exportTabBtn" onclick="exportAllReports()" style="<?= ($activeTab === 'verified' || $activeTab === 'resolved') ? '' : 'display:none' ?>"
             class="btn-intel bg-emerald-600 text-white px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-sm flex items-center gap-2 shrink-0">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H8a2 2 0 01-2-2V5a2 2 0 012-2h6l6 6v11a2 2 0 01-2 2z"/></svg>
-            Export <?= ucfirst($activeTab) ?> Reports (PDF)
+            <span class="dr-export-label">Export <?= ucfirst($activeTab) ?> Reports (PDF)</span>
         </button>
-        <?php endif; ?>
     </div>
     
     <?php
@@ -1122,7 +1398,7 @@ $tableRows = [];
         'events' => $calEvents, 'selected' => $calSelected, 'from' => $calFrom, 'to' => $calTo,
     ], JSON_HEX_TAG) ?></script>
 
-    <div class="divide-y divide-gray-50 mt-2">
+    <div id="drList" class="divide-y divide-gray-50 mt-2">
         <?php
         $brgy_filter = $filterBarangayId ? "AND dc.barangay_id = $filterBarangayId" : "";
 
@@ -1139,7 +1415,9 @@ $tableRows = [];
         // "All" shows every status (including rejected, which otherwise has
         // no tab of its own) — every other tab still filters to its status.
         $safeActiveTab = mysqli_real_escape_string($conn, $activeTab);
-        $status_filter = ($activeTab === 'all') ? '' : "AND dc.status = '$safeActiveTab'";
+        // PERFORMANCE: every status is loaded once and the Pending/Verified/Resolved/Rejected tabs filter in
+        // the browser (instant, no request). $activeTab only decides which tab is showing first.
+        $status_filter = '';
 
         $query = "SELECT dc.*, 
                     b.name AS brgy_name, 
@@ -1147,15 +1425,16 @@ $tableRows = [];
                     d.description AS disease_description,
                     d.recommended_treatment,
                     d.prevention_measures,
-                    f.profile_farmers AS farmer_photo,
+                    f.profile_farmers AS farmer_photo, f.farmer_name AS farmer_name_db,
                     " . personnel_log_select_sql() . "
                   FROM disease_cases dc 
                   LEFT JOIN barangays b ON dc.barangay_id = b.id 
                   LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
-                  LEFT JOIN farmers f   ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
+                  LEFT JOIN farmers f   ON f.farmer_id = dc.farmer_id
                   " . personnel_log_join_sql() . "
                   WHERE $manualOnlySqlDc $status_filter $brgy_filter $date_filter 
-                  ORDER BY dc.report_date DESC, dc.case_id ASC";
+                  ORDER BY dc.report_date DESC, dc.case_id ASC
+                  LIMIT 2000";   // safety cap: use the barangay / date filters to narrow beyond this
         $result = mysqli_query($conn, $query);
 
         // ── GROUP ROWS BY reference_id ──
@@ -1166,7 +1445,8 @@ $tableRows = [];
         $groupOrder  = [];  // preserves first-seen order (already sorted by report_date desc)
         if ($result) {
             while ($row = mysqli_fetch_assoc($result)) {
-                $ref = $row['reference_id'];
+                // Same key as the tab counts above: a row with no reference_id stays its own report.
+                $ref = trim((string)($row['reference_id'] ?? '')) !== '' ? $row['reference_id'] : 'c' . $row['case_id'];
                 if (!isset($groups[$ref])) {
                     $groups[$ref] = ['primary' => $row, 'diseases' => [], 'case_ids' => []];
                     $groupOrder[] = $ref;
@@ -1181,6 +1461,9 @@ $tableRows = [];
             }
         }
 
+        // PERFORMANCE: fetch all chat threads for this list in ONE query (see preloadCaseMessages).
+        preloadCaseMessages($conn, array_map(function ($g) { return $g['primary']['case_id']; }, $groups));
+
         $tableRows = []; // collected for bulk PDF export (current tab)
 
         if(count($groupOrder) > 0):
@@ -1190,7 +1473,7 @@ $tableRows = [];
                 $diseases = $group['diseases'];
                 $combined = combineDiseaseFields($diseases);
 
-                $farmer_display = extractFarmerName($row['description']) ?? '— Unassigned —';
+                $farmer_display = !empty($row['farmer_name_db']) ? $row['farmer_name_db'] : '— Unassigned —';
                 $sev_class = match($row['severity'] ?? '') {
                     'low'      => 'sev-low',
                     'moderate' => 'sev-moderate',
@@ -1212,7 +1495,7 @@ $tableRows = [];
                     'growth_stage'  => $row['growth_stage'],
                     'farmer_name'   => $farmer_display,
                     'brgy_name'     => $row['brgy_name'] ?? '—',
-                    'description'   => stripFarmerMarker($row['description']),
+                    'description'   => $row['description'] ?? '',
                     'status'        => $row['status'],
                     'remarks'       => $row['remarks'],
                     'severity'      => $row['severity'],
@@ -1229,11 +1512,12 @@ $tableRows = [];
                     'prevention_measures'    => $combined['prevention'],
                     'recommendation_sent'    => $row['recommendation_sent']    ?? 0,
                     'recommendation_text'    => $row['recommendation_text']    ?? null,
-                    'recommendation_sent_at' => $row['recommendation_sent_at'] ?? null,
+                    'recommendation_sent_at' => casd_ph_time($conn, $row['recommendation_sent_at'] ?? null),
                     'messages'               => buildCaseMessages($conn, $row),
                     'personnel'              => personnel_log_build($row),
                 ];
                 $tableRows[] = $modal_row;
+                $rowIdx = count($tableRows) - 1;   // row's position in #drTableRowsData
 
                 // Left-edge accent color, same idea as the Farm Reports rows
                 // (a colored strip keyed to the row's category) — keyed to the
@@ -1255,9 +1539,9 @@ $tableRows = [];
                     $combined['name'] ?? '',
                 ]));
         ?>
-        <div class="dr-row" style="border-left:3px solid <?= $rowAccent ?>"
+        <div class="dr-row" data-ref="<?= htmlspecialchars(trim((string)($row['reference_id'] ?? '')) !== '' ? $row['reference_id'] : 'c' . $row['case_id']) ?>" data-status="<?= htmlspecialchars($row['status']) ?>" style="border-left:3px solid <?= $rowAccent ?>;<?= ($activeTab !== 'all' && $row['status'] !== $activeTab) ? 'display:none' : '' ?>"
              data-search="<?= htmlspecialchars($rowSearch) ?>"
-             onclick='openViewModal(<?= htmlspecialchars(json_encode($modal_row), ENT_QUOTES, 'UTF-8') ?>)'>
+             onclick="drOpenRow(<?= (int)$rowIdx ?>)">
             <div class="flex items-center gap-3.5 min-w-0">
                 <?php if (!empty($row['farmer_photo'])): ?>
                 <img src="uploads/<?= htmlspecialchars($row['farmer_photo']) ?>"
@@ -1274,7 +1558,7 @@ $tableRows = [];
                 <div class="min-w-0">
                     <div class="flex items-center gap-2 flex-wrap">
                         <span class="font-bold text-gray-900 text-sm truncate"><?= htmlspecialchars($farmer_display) ?></span>
-                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-300"><?= htmlspecialchars($row['reference_id']) ?></span>
+                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-800"><?= htmlspecialchars($row['reference_id']) ?></span>
                         <span class="dr-type-chip"><?= htmlspecialchars($combined['name'] ?: '—') ?></span>
                     </div>
                     <p class="text-xs text-gray-500 font-medium truncate">
@@ -1288,7 +1572,7 @@ $tableRows = [];
                 <?php elseif (!empty($row['severity'])): ?>
                 <span class="sev-badge <?= $sev_class ?>"><?= ucfirst($row['severity']) ?></span>
                 <?php endif; ?>
-                <?php if ($activeTab === 'all'):
+                <?php
                     $statusPillStyle = match($row['status']) {
                         'pending'  => 'background:#ffedd5;color:#c2410c',
                         'verified' => 'background:#dbeafe;color:#1d4ed8',
@@ -1297,8 +1581,7 @@ $tableRows = [];
                         default    => 'background:#f3f4f6;color:#6b7280',
                     };
                 ?>
-                <span class="sev-badge" style="<?= $statusPillStyle ?>"><?= htmlspecialchars(ucfirst($row['status'])) ?></span>
-                <?php endif; ?>
+                <span class="sev-badge dr-status-pill" style="<?= $statusPillStyle ?>"><?= htmlspecialchars(ucfirst($row['status'])) ?></span>
             </div>
         </div>
         <?php endforeach; else: ?>
@@ -1310,14 +1593,25 @@ $tableRows = [];
     <!-- Shown by filterDrRows() when a search term matches none of the
          currently loaded rows (distinct from the "no reports" message
          above, which covers an empty tab). -->
+    <?php if (count($groupOrder) > 0): ?>
+    <div id="drTabEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No reports in this tab.</p></div>
+    <?php endif; ?>
     <div id="drSearchEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No reports match your search</p></div>
+
+    <!-- Page controls — built by filterDrRows() (client-side, 10 reports per page). -->
+    <div id="drPager" class="dr-pager hidden"></div>
 
     <!-- Carries this tab's rows to the client so the PDF export button (and
          the AJAX tab-switch script below) always has the right data, even
          after switching tabs without a page reload. -->
-    <script type="application/json" id="drTableRowsData"><?= json_encode($tableRows) ?></script>
+    <script type="application/json" id="drTableRowsData"><?= json_encode($tableRows, JSON_HEX_TAG | JSON_HEX_AMP | JSON_INVALID_UTF8_SUBSTITUTE) ?></script>
 
     </div><!-- /#drPanel -->
+<?php
+// PERFORMANCE: a filter/tab request only needs #drPanel. Stop here so the review modal, PDF scripts,
+// the diseases picker query and the rest of the page are not built and sent again.
+if ($isAjax && $CASD_AJAX_SKIP_LAYOUT && $_SERVER['REQUEST_METHOD'] === 'GET' && $view === 'disease') { exit; }
+?>
 </div>
 
 <?php endif; // end $view === 'disease' ?>
@@ -1333,7 +1627,7 @@ $tableRows = [];
 // How a scan row is stored (so this view reads it the same way):
 //   - disease_id is empty; the AI's answer is in the description text:
 //       "AI scan: Corn___Common_Rust detected. Confidence: 92.2%"
-//   - there is no [FARMER:...] tag; the farmer is identified by farmer_id.
+//   - the farmer is identified by farmer_id.
 //   - photo_evidence is a full path such as "uploads/scan_results/scan_5_1782904381.jpg".
 //
 // This panel deliberately does NOT use #drPanel: the AJAX tab script above swaps #drPanel and
@@ -1386,7 +1680,7 @@ $scanParse = function ($desc) {
 $scanGroups = [];
 $scanOrder  = [];
 $scan_q = mysqli_query($conn, "SELECT dc.case_id, dc.reference_id, dc.report_date, dc.description,
-            dc.farmer_id, dc.photo_evidence, dc.latitude, dc.longitude, dc.gps_accuracy,
+            dc.farmer_id, dc.disease_id, dc.photo_evidence, dc.latitude, dc.longitude, dc.gps_accuracy,
             $scanFarmerSelect
             b.name AS brgy_name, d.disease_name
         FROM disease_cases dc
@@ -1478,28 +1772,33 @@ if ($scan_q) {
         </div>
     </div>
 
-    <div class="divide-y divide-gray-50 mt-4">
+    <div id="scanList" class="divide-y divide-gray-50 mt-4">
         <?php if (count($scanOrder) > 0):
             foreach ($scanOrder as $__sref):
                 $sg        = $scanGroups[$__sref];
                 $srow      = $sg['primary'];
-                // Farmer: [FARMER:] tag if a row has one, else the farmers table (by farmer_id), else "Farmer #id".
-                $sFarmer   = extractFarmerName($srow['description'])
-                             ?? (!empty($srow['farmer_name_db']) ? $srow['farmer_name_db']
-                             : ((int)($srow['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$srow['farmer_id'] : '— Unassigned —'));
+                // Farmer: the farmers table (by farmer_id), else "Farmer #id".
+                $sFarmer   = !empty($srow['farmer_name_db']) ? $srow['farmer_name_db']
+                             : ((int)($srow['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$srow['farmer_id'] : '— Unassigned —');
                 $sDiseases = !empty($sg['diseases']) ? implode(' + ', $sg['diseases']) : '—';
                 $sConf     = !empty($sg['confs']) ? $sg['confs'][0] : null;
                 $sConfNum  = !empty($sg['confnums']) ? $sg['confnums'][0] : null;
                 // Display bands only (same colors the modal uses): 80+ green, 60-79 amber, below 60 red.
                 $sConfClass = $sConfNum === null ? 'sev-low' : ($sConfNum >= 80 ? 'sev-low' : ($sConfNum >= 60 ? 'sev-moderate' : 'sev-high'));
                 $sIsTarget = $scanHighlightId && in_array($scanHighlightId, $sg['case_ids'], true);
-                // Scan photos are stored with their full path ("uploads/scan_results/..."); a bare file name lives in uploads/.
+                // Scan photos are looked up in SCAN_PHOTO_DIR (set at the top of this file). Only the file name
+                // from the database is used, so rows saved with an old path ("uploads/scan_results/...") still work.
                 $sPhoto    = trim((string)($srow['photo_evidence'] ?? ''));
-                $sPhotoSrc = $sPhoto === '' ? '' : (strpos($sPhoto, '/') !== false ? $sPhoto : 'uploads/' . $sPhoto);
+                $sPhotoSrc = $sPhoto === '' ? '' : rtrim(SCAN_PHOTO_DIR, '/') . '/' . rawurlencode(basename(str_replace('\\', '/', $sPhoto)));
                 $sInitial  = preg_match('/\p{L}/u', $sFarmer, $__im) ? htmlspecialchars(strtoupper($__im[0])) : '?';
                 $sTs       = strtotime($srow['report_date']);
+                // "Unidentified" = the AI answered Other/Unknown AND nobody has picked a disease yet.
+                [$__sLabel] = $scanParse($srow['description']);
+                $sUnidentified = in_array((int)($srow['disease_id'] ?? 0), [0, 999], true)
+                                 && $__sLabel !== null && preg_match('/^(other|unidentified|unknown)\b/i', $__sLabel);
                 $scanModal = [
                     'case_id'        => (int)$srow['case_id'],
+                    'unidentified'   => (bool)$sUnidentified,
                     'reference_id'   => (string)($srow['reference_id'] ?? ''),
                     'farmer'         => $sFarmer,
                     'barangay'       => $srow['brgy_name'] ?? '— Unassigned —',
@@ -1517,7 +1816,7 @@ if ($scan_q) {
                     $sFarmer, (string)($srow['reference_id'] ?? ''), $srow['brgy_name'] ?? '', $sDiseases,
                 ]));
         ?>
-        <div class="dr-row scan-row" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
+        <div class="dr-row scan-row" data-ref="<?= htmlspecialchars(trim((string)($srow['reference_id'] ?? '')) !== '' ? $srow['reference_id'] : 'c' . $srow['case_id']) ?>" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
              style="border-left:3px solid #10b981;<?= $sIsTarget ? 'background:#ecfdf5;' : '' ?>"
              data-search="<?= htmlspecialchars($sSearch) ?>"
              role="button" tabindex="0"
@@ -1536,7 +1835,7 @@ if ($scan_q) {
                     <div class="flex items-center gap-2 flex-wrap">
                         <span class="font-bold text-gray-900 text-sm truncate"><?= htmlspecialchars($sFarmer) ?></span>
                         <?php if (!empty($srow['reference_id'])): ?>
-                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-300"><?= htmlspecialchars($srow['reference_id']) ?></span>
+                        <span class="text-[9px] font-bold uppercase tracking-wider text-gray-800"><?= htmlspecialchars($srow['reference_id']) ?></span>
                         <?php endif; ?>
                         <span class="dr-type-chip"><?= htmlspecialchars($sDiseases) ?></span>
                     </div>
@@ -1565,6 +1864,8 @@ if ($scan_q) {
     </div>
 
     <div id="scanSearchEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No scans match your search</p></div>
+
+    <div id="scanPager" class="dr-pager hidden"></div>
 
     <?php if (count($scanOrder) >= $scanLimit): ?>
     <p class="text-[10px] font-bold text-gray-400 uppercase tracking-widest pt-4 text-center">Showing the latest <?= (int)$scanLimit ?> scans. Use the barangay and date filters to narrow down.</p>
@@ -1640,6 +1941,7 @@ if ($scan_q) {
                     <p id="scanModalGeo" style="color:#0f172a;font-size:0.8rem;font-weight:700;margin:0;"></p>
                     <a id="scanModalMap" href="#" target="_blank" rel="noopener" style="display:inline-block;margin-top:4px;color:#059669;font-size:0.7rem;font-weight:800;text-decoration:underline;">Open in Maps</a>
                 </div>
+
             </div>
         </div>
     </div>
@@ -1647,20 +1949,21 @@ if ($scan_q) {
 
 <script>
 // Instant client-side search across the scans already loaded on this page.
-function filterScanRows() {
-    var panel = document.getElementById('scanPanel');
-    if (!panel) return;
-    var input = document.getElementById('scanSearchInput');
-    var term  = ((input && input.value) || '').trim().toLowerCase();
-    var visible = 0;
-    panel.querySelectorAll('.scan-row').forEach(function (row) {
-        var match = !term || (row.dataset.search || '').indexOf(term) !== -1;
-        row.style.display = match ? '' : 'none';
-        if (match) visible++;
+function renderScanPage(page, scrollToList) {
+    window.casePaginate({
+        panel: document.getElementById('scanPanel'), rowSel: '.scan-row', inputSel: '#scanSearchInput',
+        emptySel: '#scanSearchEmpty', pagerSel: '#scanPager', listSel: '#scanList',
+        page: page, scroll: scrollToList, scrollSel: '#scanList', noun: 'scans'
     });
-    var empty = document.getElementById('scanSearchEmpty');
-    if (empty) empty.classList.toggle('hidden', !(term && visible === 0));
 }
+// Typing in the search box goes back to page 1 of the matches.
+function filterScanRows() { renderScanPage(1, false); }
+document.addEventListener('click', function (e) {
+    var btn = e.target.closest('#scanPanel .dr-pager-btn');
+    if (!btn || btn.disabled || btn.classList.contains('active')) return;
+    renderScanPage(parseInt(btn.dataset.page, 10), true);
+});
+renderScanPage(1, false);
 
 // ── AI scan detail modal ──
 function openScanModal(d) {
@@ -1810,7 +2113,7 @@ render_review_modal($STATUS_FLOW, $allDiseasesForPicker);
 // All reports currently loaded for the active tab (used for bulk PDF export).
 // `let`, not `const` — the AJAX tab-switch script below reassigns this each
 // time the panel is swapped in, so the export button stays in sync.
-let currentTabReports = <?= json_encode($tableRows) ?>;
+let currentTabReports = <?= json_encode(array_values(array_filter($tableRows, function ($r) use ($activeTab) { return $activeTab === 'all' || $r['status'] === $activeTab; }))) ?>;
 
 <?php include __DIR__ . '/pdf_generator.php'; ?>
 
@@ -1844,7 +2147,7 @@ window.addEventListener('DOMContentLoaded', function() {
         // back in — renderRecInstructions() would re-match it against the treatment
         // list and silently re-fill the compose box, undoing the "clear on send".
         'recommendation_text'    => (isset($_GET['open_msg']) && $_GET['open_msg'] === '1') ? null : ($autoOpenData['recommendation_text'] ?? null),
-        'recommendation_sent_at' => $autoOpenData['recommendation_sent_at'] ?? null,
+        'recommendation_sent_at' => casd_ph_time($conn, $autoOpenData['recommendation_sent_at'] ?? null),
         'messages'               => $autoOpenData['messages']               ?? [],
         'personnel'              => personnel_log_build($autoOpenData),
     ]) ?>);
@@ -1887,35 +2190,115 @@ window.addEventListener('DOMContentLoaded', function() {
         // The calendar lives inside the panel, so it was just replaced too — redraw it.
         if (window.drCalendarInit) { window.drCalendarInit(); }
 
+        // New tab/filter results start on page 1 (a silent background refresh restores search + page instead).
+        var rs = window.__drRestore; window.__drRestore = null;
+        if (rs) { var inp = newPanel.querySelector('#drSearchInput'); if (inp) { inp.value = rs.term || ''; } }
+        if (window.drRenderPage) { window.drRenderPage(rs ? (rs.page || 1) : 1, false); }
+
         // Keep the PDF export button's data in sync with whichever tab is
         // now showing (each panel carries its own rows in a JSON island).
-        var dataEl = newPanel.querySelector('#drTableRowsData');
-        if (dataEl) {
-            try { currentTabReports = JSON.parse(dataEl.textContent || '[]'); }
-            catch (e) { /* keep the previous data rather than break export */ }
-        }
+        syncCurrentTabReports(newPanel, newPanel.dataset.tab || 'all');
 
         if (pushState) {
             history.pushState({ drPanel: true }, '', url);
         }
     }
 
+    // All rows of the panel (every status), parsed once from the JSON island and cached on it.
+    function panelRows(el) {
+        if (!el) return [];
+        if (!el._rows) {
+            try { el._rows = JSON.parse(el.textContent || '[]'); } catch (e) { el._rows = []; }
+        }
+        return el._rows;
+    }
+
+    // Keep the PDF export data equal to the rows of the tab that is showing.
+    function syncCurrentTabReports(panel, tab) {
+        var dataEl = panel && panel.querySelector('#drTableRowsData');
+        if (!dataEl) return;
+        currentTabReports = panelRows(dataEl).filter(function (r) { return tab === 'all' || r.status === tab; });
+    }
+
+    // Pending / Verified / Resolved / Rejected / All: switch in the browser, no request to the server.
+    window.drSetTab = function (tab) {
+        var panel = getPanel();
+        if (!panel) return;
+        panel.dataset.tab = tab;
+        panel.querySelectorAll('.dr-tabs .dr-tab').forEach(function (a) {
+            a.classList.toggle('dr-tab-active', a.dataset.drTab === tab);
+        });
+        var hid = panel.querySelector('input[name="tab"]');
+        if (hid) hid.value = tab;
+        var clear = panel.querySelector('#drClearLink');
+        if (clear) clear.setAttribute('href', '?tab=' + tab);
+        var exp = panel.querySelector('#exportTabBtn');
+        if (exp) {
+            exp.style.display = (tab === 'verified' || tab === 'resolved') ? '' : 'none';
+            var lbl = exp.querySelector('.dr-export-label');
+            if (lbl) lbl.textContent = 'Export ' + tab.charAt(0).toUpperCase() + tab.slice(1) + ' Reports (PDF)';
+        }
+        syncCurrentTabReports(panel, tab);
+        window.drRenderPage(1, false);
+        try {   // keep the address bar shareable / refreshable without adding history entries
+            var u = new URL(window.location.href);
+            u.searchParams.set('tab', tab);
+            history.replaceState({ drPanel: true }, '', u.toString());
+        } catch (e) {}
+    };
+
+    // PERFORMANCE / RELIABILITY: only the newest request may update the panel. Older in-flight
+    // requests are cancelled, so a slow earlier response can no longer overwrite a newer filter,
+    // and a cancelled request no longer triggers the full-page-reload fallback.
+    var currentReq = null;
+
     function loadPanel(url, pushState) {
+        if (currentReq) { currentReq.abort(); }
+        var ctrl = currentReq = new AbortController();
+
         var panel = getPanel();
         if (panel) panel.classList.add('dr-panel-loading');
 
-        fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+        fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, signal: ctrl.signal })
             .then(function (resp) {
                 if (!resp.ok) throw new Error('Request failed: ' + resp.status);
                 return resp.text();
             })
-            .then(function (html) { swapPanel(html, url, pushState); })
-            .catch(function () { window.location.href = url; })
+            .then(function (html) {
+                if (ctrl !== currentReq) return;          // superseded by a newer request
+                swapPanel(html, url, pushState);
+            })
+            .catch(function (err) {
+                if (err && err.name === 'AbortError') return;   // cancelled on purpose
+                if (ctrl !== currentReq) return;
+                window.location.href = url;
+            })
             .finally(function () {
+                if (ctrl !== currentReq) return;          // newer request owns the loading state
+                currentReq = null;
                 var p = getPanel();
                 if (p) p.classList.remove('dr-panel-loading');
             });
     }
+
+    // Clicking a report row: look its data up in the panel's JSON island (sent once per panel)
+    // instead of every row carrying its own full copy in the onclick attribute.
+    window.drOpenRow = function (i) {
+        var rows = panelRows(document.getElementById('drTableRowsData'));
+        if (rows[i] && typeof openViewModal === 'function') { openViewModal(rows[i]); }
+    };
+
+    // Background refresh used by the live "new reports" check: reloads the current tab/filters in place and
+    // keeps what the person was doing (search text, page number, tab). Returns false if it cannot run now.
+    window.drSilentRefresh = function () {
+        var panel = getPanel();
+        if (!panel || panel.classList.contains('dr-panel-loading')) return false;
+        var inp = panel.querySelector('#drSearchInput');
+        var act = panel.querySelector('.dr-pager-btn.active');
+        window.__drRestore = { term: inp ? inp.value : '', page: act ? parseInt(act.dataset.page, 10) : 1 };
+        loadPanel(window.location.href, false);
+        return true;
+    };
 
     window.drLoadPanel = loadPanel;   // used by the calendar to filter by day
 
@@ -1925,6 +2308,7 @@ window.addEventListener('DOMContentLoaded', function() {
         var link = e.target.closest('#' + PANEL_ID + ' a[href^="?"]');
         if (!link) return;
         e.preventDefault();
+        if (link.dataset.drTab) { window.drSetTab(link.dataset.drTab); return; }   // tab: no fetch
         loadPanel(link.getAttribute('href'), true);
     });
 
@@ -1949,21 +2333,34 @@ window.addEventListener('DOMContentLoaded', function() {
     // current tab — same behavior as the Farm Reports search bar. Defined
     // globally (not re-bound per panel) since #drPanel gets replaced whole
     // on every tab switch; this just re-queries the DOM each time it runs.
-    window.filterDrRows = function () {
+    window.drRenderPage = function (page, scrollToList) {
         var panel = getPanel();
         if (!panel) return;
-        var input = panel.querySelector('#drSearchInput');
-        var term = ((input && input.value) || '').trim().toLowerCase();
-        var rows = panel.querySelectorAll('.dr-row');
-        var visibleCount = 0;
-        rows.forEach(function (row) {
-            var matches = !term || (row.dataset.search || '').indexOf(term) !== -1;
-            row.style.display = matches ? '' : 'none';
-            if (matches) visibleCount++;
+        var tab = panel.dataset.tab || 'all';
+        var rowFilter = function (row) { return tab === 'all' || row.dataset.status === tab; };
+        window.casePaginate({
+            panel: panel, rowSel: '.dr-row', inputSel: '#drSearchInput', emptySel: '#drSearchEmpty',
+            pagerSel: '#drPager', listSel: '#drList', page: page, scroll: scrollToList,
+            scrollSel: '.dr-tabs-wrap', noun: 'reports', rowFilter: rowFilter
         });
-        var emptyEl = panel.querySelector('#drSearchEmpty');
-        if (emptyEl) emptyEl.classList.toggle('hidden', !(term && visibleCount === 0));
+        var inTab = 0;
+        panel.querySelectorAll('.dr-row').forEach(function (r) { if (rowFilter(r)) inTab++; });
+        var te = panel.querySelector('#drTabEmpty');
+        if (te) te.classList.toggle('hidden', inTab > 0);
+        if (inTab === 0) { var se = panel.querySelector('#drSearchEmpty'); if (se) se.classList.add('hidden'); }
     };
+
+    // Typing in the search box goes back to page 1 of the matches.
+    window.filterDrRows = function () { window.drRenderPage(1, false); };
+
+    document.addEventListener('click', function (e) {
+        var btn = e.target.closest('#' + PANEL_ID + ' .dr-pager-btn');
+        if (!btn || btn.disabled || btn.classList.contains('active')) return;
+        window.drRenderPage(parseInt(btn.dataset.page, 10), true);
+    });
+
+    // First paint on page load (panel swaps call drRenderPage themselves in swapPanel).
+    window.drRenderPage(1, false);
 
     // Support the browser's Back/Forward buttons for tab/filter changes.
     window.addEventListener('popstate', function () {
@@ -2033,5 +2430,125 @@ window.addEventListener('DOMContentLoaded', function() {
     else { window.drCalendarInit(); }
 })();
 </script>
+
+<?php if (!$isAjax): ?>
+<?php
+// PRERENDER (Chrome / Edge): while the person looks at one view, the browser can get the other two views
+// ready in the background, so clicking a card shows the page instantly. Other browsers ignore this.
+// "moderate" = starts when the pointer rests on a card; change to "eager" to prepare them straight away.
+$casdSpecUrls = [];
+$casdBasePath = strtok($_SERVER['REQUEST_URI'] ?? 'reports.php', '?');
+foreach (['disease', 'farm', 'scans'] as $__v) { if ($__v !== $view) { $casdSpecUrls[] = $casdBasePath . '?view=' . $__v; } }
+?>
+<script type="speculationrules"><?= json_encode(['prerender' => [['urls' => $casdSpecUrls, 'eagerness' => 'moderate']]], JSON_UNESCAPED_SLASHES) ?></script>
+
+<!-- ═══ LIVE NEW-REPORT CHECK ═══
+     Every few seconds (only while this tab is visible) asks reports_poll.php whether anything changed.
+     Nothing changed -> a tiny reply and nothing else happens. Something changed ->
+       - the numbers on the three cards update right away,
+       - Disease Reports: the list refreshes in place (search text, page and tab are kept),
+       - Farm Reports / AI Scans: a small "Refresh" notice appears (so nothing under your hands moves),
+       - a page that was prepared in the background (prerender) and is now stale simply reloads itself. -->
+<script>
+(function () {
+    var VIEW      = <?= json_encode($view) ?>;
+    var POLL_URL  = <?= json_encode(rtrim(dirname($casdBasePath), '/') . '/reports_poll.php', JSON_UNESCAPED_SLASHES) ?>;
+    var INTERVAL  = 10000;                      // ms between checks
+    var seen      = <?= json_encode($casdSig) ?>;
+    var section   = VIEW === 'disease' ? 'disease' : (VIEW === 'scans' ? 'scans' : 'farm');
+    var wasPrerendered = !!document.prerendering;
+    var userTouched = false, busy = false, timer = null, banner = null, ownWriteAt = 0;
+
+    // Remember when THIS person last saved something (accept / reject / send ...), so their own change is not
+    // announced back to them as "new reports".
+    var _fetch = window.fetch;
+    window.fetch = function (input, init) {
+        var p = _fetch.apply(this, arguments);
+        try {
+            if (init && init.method && String(init.method).toUpperCase() === 'POST') {
+                p.then(function () { ownWriteAt = Date.now(); }, function () {});
+            }
+        } catch (e) {}
+        return p;
+    };
+
+    ['pointerdown', 'keydown'].forEach(function (ev) {
+        window.addEventListener(ev, function () { userTouched = true; }, { capture: true, passive: true });
+    });
+
+    function modalOpen() {
+        return !!document.querySelector('#viewModal:not(.hidden), #messageModal:not(.hidden), #scanModal:not(.hidden), #phViewModal:not(.hidden), .casd-overlay');
+    }
+
+    function say(msg, withRefresh) {
+        if (banner && banner.parentNode) banner.parentNode.removeChild(banner);
+        banner = document.createElement('div');
+        banner.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:2147482000;display:flex;align-items:center;gap:12px;' +
+            'background:#064e3b;color:#fff;padding:12px 16px;border-radius:14px;font:700 12px Inter,sans-serif;box-shadow:0 12px 30px -8px rgba(0,0,0,.35)';
+        var span = document.createElement('span'); span.textContent = msg; banner.appendChild(span);
+        if (withRefresh) {
+            var b = document.createElement('button'); b.type = 'button'; b.textContent = 'Refresh';
+            b.style.cssText = 'background:#fbc02d;color:#064e3b;border:0;border-radius:9px;padding:6px 12px;font:900 10px Inter,sans-serif;letter-spacing:.08em;text-transform:uppercase;cursor:pointer';
+            b.onclick = function () { window.location.reload(); };
+            banner.appendChild(b);
+        } else {
+            setTimeout(function () { if (banner && banner.parentNode) banner.parentNode.removeChild(banner); }, 4000);
+        }
+        document.body.appendChild(banner);
+    }
+
+    function applyStats(st) {
+        if (!st) return;
+        var d = document.getElementById('cardDiseaseStat');
+        if (d) d.textContent = st.manual_total + ' manual \u00b7 ' + st.manual_pending + ' awaiting review';
+        var s = document.getElementById('cardScanStat');
+        if (s) s.textContent = st.scan_total + ' scanned \u00b7 ' + st.scan_week + ' this week';
+    }
+
+    function handleCurrent(newSig) {
+        // A page that was prepared in the background is stale and nobody has touched it yet: just reload it.
+        if (wasPrerendered && !userTouched) { window.location.reload(); return; }
+        if (section === 'disease' && window.drSilentRefresh) {
+            if (modalOpen()) return;                       // try again on the next check; don't disturb an open report
+            if (!window.drSilentRefresh()) return;         // a refresh is already running
+            seen[section] = newSig;      // list refreshed quietly -- no banner
+            return;
+        }
+        seen[section] = newSig;
+        if (Date.now() - ownWriteAt < 20000) return;       // the change was this person's own save
+        say(section === 'scans' ? 'New AI scans available' : 'New farm reports available', true);
+    }
+
+    function check() {
+        if (busy || document.hidden || document.prerendering) return;
+        busy = true;
+        fetch(POLL_URL + '?since=' + encodeURIComponent(JSON.stringify(seen)), {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }, cache: 'no-store', credentials: 'same-origin'
+        })
+        .then(function (r) { return r.json(); })           // a login page (expired session) is not JSON -> ignored
+        .then(function (data) {
+            if (!data || !data.changed) return;
+            applyStats(data.stats);
+            Object.keys(data.sig).forEach(function (k) {
+                var now = data.sig[k], before = seen[k];
+                if (!now || !before || now === before) { if (now && !before) seen[k] = now; return; }
+                if (k === section) { handleCurrent(now); } else { seen[k] = now; }
+            });
+        })
+        .catch(function () { /* offline / session expired: try again next time */ })
+        .finally(function () { busy = false; });
+    }
+
+    function start() {
+        timer = setInterval(check, INTERVAL);
+        document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
+        if (wasPrerendered) check();                       // first thing after the page is shown
+    }
+
+    if (document.prerendering) { document.addEventListener('prerenderingchange', start, { once: true }); }
+    else { start(); }
+})();
+</script>
+<?php endif; ?>
 
 <?php include "includes/layout-end.php"; ?>

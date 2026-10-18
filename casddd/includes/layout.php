@@ -16,6 +16,7 @@ if (!isset($pageTitle)) $pageTitle = "Corn Portal";
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?php echo htmlspecialchars($pageTitle); ?> — CASD Corn Portal</title>
+    <link rel="icon" type="image/png" href="/casddd/casddd/uploads/lugo.png">
 
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -37,5 +38,6 @@ if (!isset($pageTitle)) $pageTitle = "Corn Portal";
     <main class="flex-1 flex flex-col overflow-hidden">
 
         <?php include __DIR__ . '/header.php'; ?>
+        <?php include __DIR__ . '/notifications.php'; ?>
 
         <div id="contentBody" class="p-10 overflow-y-auto bg-[#f8fafc] flex-1">

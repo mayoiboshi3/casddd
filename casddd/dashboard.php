@@ -3,11 +3,20 @@ $pageTitle = "Dashboard / Map";
 include "includes/layout.php";
 
 // ── DATABASE CONNECTION ──
-$conn = new mysqli('localhost', 'root', '882372', 'corncasd_db');
+$conn = new mysqli('localhost', 'root', '', 'db2');
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
 $conn->set_charset('utf8mb4'); // so names like "Bañadero" come through intact
+
+if (isset($conn) && $conn) {
+    mysqli_query($conn, "UPDATE disease_cases dc
+                         INNER JOIN farmers f ON f.farmer_id = dc.farmer_id
+                         SET dc.barangay_id = f.barangay_id,
+                             dc.updated_at  = dc.updated_at
+                         WHERE dc.barangay_id IS NULL
+                           AND f.barangay_id IS NOT NULL");
+}
 
 // ── STAT: Total Farmers ──
 $totalFarmers = 0;
@@ -18,17 +27,17 @@ if ($f) { $totalFarmers = $f->fetch_assoc()['cnt']; }
 // ── STAT: Active Reports (pending + verified) — manual reports only; AI scans
 // don't need review, so they're excluded here and counted separately below. ──
 $totalActiveReports = 0;
-$r = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
+$r = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
 if ($r) { $totalActiveReports = $r->fetch_assoc()['cnt']; }
 
 // ── STAT: Verified Cases (manual reports only) ──
 $totalVerifiedCases = 0;
-$v = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
+$v = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
 if ($v) { $totalVerifiedCases = $v->fetch_assoc()['cnt']; }
 
 // ── STAT: AI Scans — auto-classified cases that don't require review ──
 $totalAiScans = 0;
-$as = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
+$as = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
 if ($as) { $totalAiScans = $as->fetch_assoc()['cnt']; }
 
 // ── BUILD BARANGAY DATA ──
@@ -62,7 +71,25 @@ if ($brgy_res) {
         $ai_scan_count  = 0;
         $cases = [];
         if ($cases_res) {
-            while ($c = $cases_res->fetch_assoc()) {
+            // A report with 2-3 diseases selected is several rows sharing one reference_id — fold them
+            // into ONE report (diseases joined with " + ") so the counts and the popup list match the
+            // Reports page instead of counting each disease separately.
+            $grouped = [];
+            while ($row_c = $cases_res->fetch_assoc()) {
+                $gkey = trim((string)($row_c['reference_id'] ?? '')) !== '' ? $row_c['reference_id'] : 'c' . $row_c['case_id'];
+                if (!isset($grouped[$gkey])) {
+                    $grouped[$gkey] = ['row' => $row_c, 'diseases' => []];
+                } elseif ((int)$row_c['case_id'] < (int)$grouped[$gkey]['row']['case_id']) {
+                    $grouped[$gkey]['row'] = $row_c;   // lowest case_id = the representative row
+                }
+                $dn = trim((string)($row_c['disease_name'] ?? ''));
+                if ($dn !== '' && !in_array($dn, $grouped[$gkey]['diseases'], true)) {
+                    $grouped[$gkey]['diseases'][] = $dn;
+                }
+            }
+            foreach ($grouped as $g) {
+                $c = $g['row'];
+                if (!empty($g['diseases'])) $c['disease_name'] = implode(' + ', $g['diseases']);
                 $isAiScan = ($c['source'] === 'scan');
 
                 if ($isAiScan) {
@@ -129,8 +156,12 @@ if ($brgy_res) {
 
 // ── STAT: Pending Cases (manual reports only — AI scans never need review) ──
 $totalPendingCases = 0;
-$pq = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
+$pq = $conn->query("SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
 if ($pq) { $totalPendingCases = $pq->fetch_assoc()['cnt']; }
+
+// ── LIVE REFRESH: signature of the data as of THIS render. The browser compares it with reports_poll.php ──
+require_once __DIR__ . "/reports_poll.php";
+$casdSig = reports_signature($conn);
 
 $conn->close();
 ?>
@@ -149,10 +180,11 @@ main { display: flex; width: 100%; height: 100vh; }
     cursor: pointer;
     stroke: rgba(255,255,255,0.15);
     stroke-width: 0.4px;
-    transition: transform 0.25s cubic-bezier(0.2,0.8,0.2,1),
-                filter   0.25s cubic-bezier(0.2,0.8,0.2,1),
-                stroke   0.25s ease,
-                stroke-width 0.25s ease;
+    transition: transform 0.18s cubic-bezier(0.2,0.8,0.2,1),
+                opacity   0.15s ease,
+                fill      0.15s ease,
+                stroke    0.15s ease,
+                stroke-width 0.15s ease;
     transform-box: fill-box;
     transform-origin: center;
 }
@@ -497,42 +529,41 @@ main { display: flex; width: 100%; height: 100vh; }
 /* ── MAP FILTER STATES ── */
 #map-3d-wrap svg path.map-dimmed {
     opacity: 0.18;
-    filter: grayscale(1) brightness(0.5) !important;
+    filter: none !important;
     animation: none !important;
 }
 #map-3d-wrap svg path.map-highlighted-active {
     fill: #16a34a !important;
     filter: drop-shadow(0 0 8px rgba(22,163,74,1))
-            drop-shadow(0 0 20px rgba(22,163,74,0.85))
-            drop-shadow(0 0 40px rgba(22,163,74,0.5)) !important;
+            drop-shadow(0 0 20px rgba(22,163,74,0.9)) !important;
     stroke: #86efac !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
     animation: none !important;
 }
 #map-3d-wrap svg path.map-highlighted-pending {
+    animation: none !important;
     fill: #f97316 !important;
     filter: drop-shadow(0 0 8px rgba(249,115,22,1))
-            drop-shadow(0 0 20px rgba(249,115,22,0.85))
-            drop-shadow(0 0 40px rgba(249,115,22,0.5)) !important;
+            drop-shadow(0 0 20px rgba(249,115,22,0.9)) !important;
     stroke: #fdba74 !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
 #map-3d-wrap svg path.map-highlighted-verified {
+    animation: none !important;
     fill: #3b82f6 !important;
     filter: drop-shadow(0 0 8px rgba(59,130,246,1))
-            drop-shadow(0 0 20px rgba(59,130,246,0.85))
-            drop-shadow(0 0 40px rgba(59,130,246,0.5)) !important;
+            drop-shadow(0 0 20px rgba(59,130,246,0.9)) !important;
     stroke: #93c5fd !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
 }
 #map-3d-wrap svg path.map-highlighted-affected {
+    animation: none !important;
     fill: #ff6600 !important;
     filter: drop-shadow(0 0 8px rgba(255,102,0,1))
-            drop-shadow(0 0 20px rgba(255,102,0,0.85))
-            drop-shadow(0 0 40px rgba(255,102,0,0.5)) !important;
+            drop-shadow(0 0 20px rgba(255,102,0,0.9)) !important;
     stroke: #ffaa44 !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
@@ -540,8 +571,7 @@ main { display: flex; width: 100%; height: 100vh; }
 #map-3d-wrap svg path.map-highlighted-scan {
     fill: #8b5cf6 !important;
     filter: drop-shadow(0 0 8px rgba(139,92,246,1))
-            drop-shadow(0 0 20px rgba(139,92,246,0.85))
-            drop-shadow(0 0 40px rgba(139,92,246,0.5)) !important;
+            drop-shadow(0 0 20px rgba(139,92,246,0.9)) !important;
     stroke: #c4b5fd !important;
     stroke-width: 1.5px !important;
     opacity: 1 !important;
@@ -782,46 +812,47 @@ function findBarangayByPathId(pathId) {
 }
 
 // ── APPLY HIGHLIGHT CLASSES ON LOAD ──
-document.querySelectorAll('#map-3d-wrap svg path').forEach(path => {
+// Build the path → barangay lookup ONCE (normalizing names for every path on every
+// filter click was the main source of lag).
+const mapPathInfo = Array.from(document.querySelectorAll('#map-3d-wrap svg path')).map(path => {
     const match = findBarangayByPathId(path.id);
-    if (match && match.data.highlight !== 'none') {
-        path.classList.add('status-' + match.data.highlight);
+    return { path, data: match ? match.data : null };
+});
+mapPathInfo.forEach(({ path, data }) => {
+    if (data && data.highlight !== 'none') {
+        path.classList.add('status-' + data.highlight);
     }
 });
 
 // ── CARD FILTER ──
 let activeFilter = null;
+let filterFrame  = null;
+
+const MAP_FILTER_CLASSES = ['map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected','map-highlighted-scan'];
+const MAP_FILTER_RULES = {
+    active:   { cls: 'map-highlighted-active',   test: d => d.total_active   > 0 },
+    pending:  { cls: 'map-highlighted-pending',  test: d => d.pending_count  > 0 },
+    verified: { cls: 'map-highlighted-verified', test: d => d.verified_count > 0 },
+    affected: { cls: 'map-highlighted-affected', test: d => d.total_active   > 0 },
+    ai_scan:  { cls: 'map-highlighted-scan',     test: d => d.ai_scan_count  > 0 }
+};
 
 function applyMapFilter(filterType) {
-    const allPaths = document.querySelectorAll('#map-3d-wrap svg path');
-    if (!filterType) {
-        allPaths.forEach(path => {
-            path.classList.remove('map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected');
+    // Compute the target class for every path first, then write them all in one frame.
+    const rule = filterType ? MAP_FILTER_RULES[filterType] : null;
+    const targets = mapPathInfo.map(({ data }) => {
+        if (!rule) return null;
+        return (data && rule.test(data)) ? rule.cls : 'map-dimmed';
+    });
+    if (filterFrame) cancelAnimationFrame(filterFrame);
+    filterFrame = requestAnimationFrame(() => {
+        filterFrame = null;
+        mapPathInfo.forEach(({ path }, i) => {
+            const cl = path.classList;
+            const target = targets[i];
+            MAP_FILTER_CLASSES.forEach(c => { if (c !== target && cl.contains(c)) cl.remove(c); });
+            if (target && !cl.contains(target)) cl.add(target);
         });
-        return;
-    }
-    allPaths.forEach(path => {
-        const match = findBarangayByPathId(path.id);
-        const data  = match ? match.data : null;
-        path.classList.remove('map-dimmed','map-highlighted-active','map-highlighted-pending','map-highlighted-verified','map-highlighted-affected','map-highlighted-scan');
-
-        let qualifies = false;
-        if (filterType === 'active'   && data && data.total_active   > 0) qualifies = true;
-        if (filterType === 'pending'  && data && data.pending_count  > 0) qualifies = true;
-        if (filterType === 'verified' && data && data.verified_count > 0) qualifies = true;
-        if (filterType === 'affected' && data && data.total_active   > 0) qualifies = true;
-        if (filterType === 'ai_scan'  && data && data.ai_scan_count  > 0) qualifies = true;
-
-        if (qualifies) {
-            const cls = filterType === 'active'   ? 'map-highlighted-active'
-                      : filterType === 'pending'  ? 'map-highlighted-pending'
-                      : filterType === 'verified' ? 'map-highlighted-verified'
-                      : filterType === 'ai_scan'  ? 'map-highlighted-scan'
-                      :                             'map-highlighted-affected';
-            path.classList.add(cls);
-        } else {
-            path.classList.add('map-dimmed');
-        }
     });
 }
 
@@ -1181,3 +1212,87 @@ function closeBrgyLightbox() {
 </script>
 
 <?php include "includes/layout-end.php"; ?>
+
+<!-- ═══ LIVE UPDATE ═══
+     Every 10 s (only while this tab is visible) asks reports_poll.php whether any report changed.
+     Nothing changed -> a tiny reply and nothing else happens. Something changed -> the page's data is re-read
+     in the background and the stat cards, the map colours and (if open) the barangay popup update in place:
+     no reload, the selected card filter and the popup's tab / search / date are kept. -->
+<script>
+(function () {
+    var POLL_URL = <?= json_encode(rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/') . '/reports_poll.php', JSON_UNESCAPED_SLASHES) ?>;
+    var PAGE_URL = location.pathname + location.search;
+    var INTERVAL = 10000;
+    var seen = <?= json_encode($casdSig) ?>;
+    var busy = false;
+
+    function pulse(el) {
+        try { el.animate([{ transform: 'scale(1.3)', color: '#10b981' }, { transform: 'none' }], { duration: 700, easing: 'ease-out' }); } catch (e) {}
+    }
+
+    // If a barangay popup is open, rebuild it from the new data and put the person's tab / search / date back.
+    function refreshOpenPopup() {
+        var ov = document.getElementById('brgy-popup-overlay'), lb = document.getElementById('brgy-photo-lightbox');
+        if (!ov || ov.style.display !== 'block' || (lb && lb.style.display === 'flex')) return;
+        var want = normalizeName(currentBrgyName);
+        var info = mapPathInfo.filter(function (i) { return normalizeName(i.path.id) === want; })[0];
+        if (!info) return;
+        var saved = { status: brgyFilterState.status, search: brgyFilterState.search, date: brgyFilterState.date };
+        var oldList = document.getElementById('brgy-report-list'), top = oldList ? oldList.scrollTop : 0;
+        info.path.dispatchEvent(new MouseEvent('click', { bubbles: true }));          // rebuilds the popup with the fresh data
+        brgyFilterState = saved;
+        var si = document.getElementById('brgy-search-input'); if (si && saved.search) si.value = saved.search;
+        var di = document.getElementById('brgy-date-input');   if (di && saved.date)   di.value = saved.date;
+        setBrgyStatusFilter(saved.status);
+        var newList = document.getElementById('brgy-report-list'); if (newList) newList.scrollTop = top;
+    }
+
+    function applyFresh(html) {
+        var m = html.match(/const barangayData = (.*?);[ \t]*\r?\n/);
+        if (!m) throw new Error('data not found');
+        var fresh = JSON.parse(m[1]);
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+
+        // stat cards (numbers + the little progress bars)
+        var nums = document.querySelectorAll('.dcard-num'), newNums = doc.querySelectorAll('.dcard-num');
+        Array.prototype.forEach.call(nums, function (el, i) {
+            var n = newNums[i];
+            if (n && el.textContent !== n.textContent) { el.textContent = n.textContent; pulse(el); }
+        });
+        var bars = document.querySelectorAll('.dcard-bar > div'), newBars = doc.querySelectorAll('.dcard-bar > div');
+        Array.prototype.forEach.call(bars, function (el, i) { if (newBars[i]) el.style.width = newBars[i].style.width; });
+
+        // map data + colours
+        Object.keys(barangayData).forEach(function (k) { delete barangayData[k]; });
+        Object.assign(barangayData, fresh);
+        mapPathInfo.forEach(function (info) {
+            var mm = findBarangayByPathId(info.path.id);
+            info.data = mm ? mm.data : null;
+            Array.prototype.slice.call(info.path.classList).forEach(function (c) { if (c.indexOf('status-') === 0) info.path.classList.remove(c); });
+            if (info.data && info.data.highlight !== 'none') info.path.classList.add('status-' + info.data.highlight);
+        });
+        if (activeFilter) applyMapFilter(activeFilter);                                 // keep the selected card filter
+        refreshOpenPopup();
+    }
+
+    function check() {
+        if (busy || document.hidden) return;
+        busy = true;
+        fetch(POLL_URL + '?since=' + encodeURIComponent(JSON.stringify(seen)), {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }, cache: 'no-store', credentials: 'same-origin'
+        })
+        .then(function (r) { return r.json(); })                    // an expired session gives a login page, not JSON -> ignored
+        .then(function (data) {
+            if (!data || !data.changed) return;
+            return fetch(PAGE_URL, { cache: 'no-store', credentials: 'same-origin' })
+                .then(function (r) { return r.text(); })
+                .then(function (html) { applyFresh(html); seen = data.sig; });   // only remembered once the refresh worked
+        })
+        .catch(function (err) { console.warn('[dashboard live update]', err); })
+        .finally(function () { busy = false; });
+    }
+
+    setInterval(check, INTERVAL);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
+})();
+</script>
