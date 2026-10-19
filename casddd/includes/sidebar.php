@@ -1,6 +1,6 @@
 <?php $current_page = basename($_SERVER['PHP_SELF']); ?>
 
-<nav class="w-80 sidebar-gradient text-slate-300 flex flex-col flex-shrink-0 shadow-2xl h-screen" style="perspective: 1000px;">
+<nav id="siteSidebar" class="w-80 sidebar-gradient text-slate-300 flex flex-col flex-shrink-0 shadow-2xl h-screen" style="perspective: 1000px;">
     
     <div class="p-8 border-b border-emerald-900/50">
     <div class="flex items-center gap-4">

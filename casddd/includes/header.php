@@ -21,7 +21,7 @@ $nameParts = explode(' ', trim($sessionName));
 $initials  = strtoupper(substr($nameParts[0], 0, 1) . (isset($nameParts[1]) ? substr($nameParts[1], 0, 1) : ''));
 ?>
 
-<header class="h-16 sm:h-20 bg-white border-b flex items-center justify-between px-4 sm:px-6 md:px-10 flex-shrink-0">
+<header id="siteHeader" class="h-16 sm:h-20 bg-white border-b flex items-center justify-between px-4 sm:px-6 md:px-10 flex-shrink-0">
     <h2 class="text-emerald-900 font-extrabold text-base sm:text-lg truncate pr-3">
         <?php echo htmlspecialchars($pageTitle ?? 'Portal'); ?>
     </h2>

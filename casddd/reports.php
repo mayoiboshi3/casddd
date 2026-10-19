@@ -1297,7 +1297,7 @@ window.casePaginate = function (cfg) {
      Disease Reports and Farm (Planting & Harvesting) Reports never mix on the
      same screen anymore.
      Card order, left to right: Disease Reports, Farm Reports, AI Scans. -->
-<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+<div id="reportViewSwitcher" class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
     <a href="?view=disease" class="btn-intel flex items-center gap-4 p-6 rounded-[1.75rem] border-2 <?= $view === 'disease' ? 'bg-emerald-600 border-emerald-600 shadow-lg' : 'bg-white border-gray-100 hover:border-emerald-200' ?>">
         <div class="w-12 h-12 flex-shrink-0 rounded-2xl flex items-center justify-center text-2xl <?= $view === 'disease' ? 'bg-white/15' : 'bg-emerald-50' ?>">🌽</div>
         <div class="text-left">
@@ -1321,7 +1321,8 @@ window.casePaginate = function (cfg) {
     </a>
 </div>
 
-<?php if ($view === 'disease'): ?>
+<?php if (!$isAjax || $view === 'disease'): ?>
+<section data-report-view="disease" style="<?= $view === 'disease' ? '' : 'display:none' ?>">
 
 <?php if ($filterBarangayId): ?>
 <div class="mb-6">
@@ -1694,9 +1695,11 @@ if ($isAjax && $CASD_AJAX_SKIP_LAYOUT && $_SERVER['REQUEST_METHOD'] === 'GET' &&
 ?>
 </div>
 
-<?php endif; // end $view === 'disease' ?>
+</section>
+<?php endif; // end disease section ?>
 
-<?php if ($view === 'scans'): ?>
+<?php if (!$isAjax || $view === 'scans'): ?>
+<section data-report-view="scans" style="<?= $view === 'scans' ? '' : 'display:none' ?>">
 <?php
 // ═══ AI SCANS VIEW ═══
 // Cases the AI image detector classified (disease_cases.source = 'scan').
@@ -1711,9 +1714,8 @@ if ($isAjax && $CASD_AJAX_SKIP_LAYOUT && $_SERVER['REQUEST_METHOD'] === 'GET' &&
 //   - the farmer is identified by farmer_id.
 //   - photo_evidence is a full path such as "uploads/scan_results/scan_5_1782904381.jpg".
 //
-// This panel deliberately does NOT use #drPanel: the AJAX tab script above swaps #drPanel and
-// intercepts its links, and this view is a normal page load (?view=scans) with its own filters.
-$tableRows = []; // the PDF-export script further down reads this; nothing to export here
+// This panel has its own filters; switching report types keeps it mounted alongside #drPanel.
+// Keep the disease view's export data when all three sections are loaded.
 
 $scanBrgySql = $filterBarangayId ? "AND dc.barangay_id = " . (int)$filterBarangayId : "";
 $scanDateSql = "";
@@ -1724,7 +1726,7 @@ if ($filterDateTo !== '') {
     $scanDateSql .= " AND dc.report_date <= '" . mysqli_real_escape_string($conn, $filterDateTo) . " 23:59:59'";
 }
 $scanHighlightId = isset($_GET['scan_id']) ? (int)$_GET['scan_id'] : 0;   // set by the dashboard deep link
-// Verified / Resolved tabs (normal page load, so the tab lives in the URL). A dashboard deep link to a
+// Status tabs filter the loaded rows in place. A dashboard deep link to a
 // resolved scan opens the Resolved tab so the highlighted row is actually on screen.
 $scanTab = $_GET['tab'] ?? '';
 if (!in_array($scanTab, ['all', 'verified', 'resolved'], true)) {
@@ -1838,7 +1840,7 @@ $scanTabQs = function ($tab) use ($filterBarangayId, $filterDateFrom, $filterDat
     <div class="dr-tabs-wrap">
         <div class="dr-tabs">
             <?php foreach (['all' => 'All', 'verified' => 'Verified', 'resolved' => 'Resolved'] as $__tk => $__tl): ?>
-                <a href="<?= htmlspecialchars($scanTabQs($__tk)) ?>" class="<?= $scanTab === $__tk ? 'dr-tab dr-tab-active' : 'dr-tab' ?>">
+                <a href="<?= htmlspecialchars($scanTabQs($__tk)) ?>" data-scan-tab="<?= $__tk ?>" class="<?= $scanTab === $__tk ? 'dr-tab dr-tab-active' : 'dr-tab' ?>">
                     <?= $__tl ?> <span class="dr-tab-count"><?= (int)$scanCounts[$__tk] ?></span>
                 </a>
             <?php endforeach; ?>
@@ -1891,12 +1893,10 @@ $scanTabQs = function ($tab) use ($filterBarangayId, $filterDateFrom, $filterDat
     </div>
 
     <div id="scanList" class="divide-y divide-gray-50 mt-4">
-        <?php if ($scanCounts[$scanTab] > 0):
-            foreach ($scanOrder as $__sref):
+        <?php foreach ($scanOrder as $__sref):
                 $sg        = $scanGroups[$__sref];
                 $srow      = $sg['primary'];
                 $sStatus   = $srow['status'] === 'resolved' ? 'resolved' : 'verified';
-                if ($scanTab !== 'all' && $sStatus !== $scanTab) { continue; }
                 // Farmer: the farmers table (by farmer_id), else "Farmer #id".
                 $sFarmer   = !empty($srow['farmer_name_db']) ? $srow['farmer_name_db']
                              : ((int)($srow['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$srow['farmer_id'] : '— Unassigned —');
@@ -1939,7 +1939,7 @@ $scanTabQs = function ($tab) use ($filterBarangayId, $filterDateFrom, $filterDat
                     $sFarmer, (string)($srow['reference_id'] ?? ''), $srow['brgy_name'] ?? '', $sDiseases,
                 ]));
         ?>
-        <div class="dr-row scan-row" data-ref="<?= htmlspecialchars(trim((string)($srow['reference_id'] ?? '')) !== '' ? $srow['reference_id'] : 'c' . $srow['case_id']) ?>" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
+        <div class="dr-row scan-row" data-status="<?= $sStatus ?>" data-ref="<?= htmlspecialchars(trim((string)($srow['reference_id'] ?? '')) !== '' ? $srow['reference_id'] : 'c' . $srow['case_id']) ?>" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
              style="border-left:3px solid <?= $sStatus === 'resolved' ? '#059669' : '#2563eb' ?>;<?= $sIsTarget ? 'background:#ecfdf5;' : '' ?>"
              data-search="<?= htmlspecialchars($sSearch) ?>"
              role="button" tabindex="0"
@@ -1974,19 +1974,8 @@ $scanTabQs = function ($tab) use ($filterBarangayId, $filterDateFrom, $filterDat
                 <span class="sev-badge scan-status-pill" style="<?= $sStatus === 'resolved' ? 'background:#d1fae5;color:#065f46' : 'background:#dbeafe;color:#1d4ed8' ?>"><?= $sStatus === 'resolved' ? 'Resolved' : 'Verified' ?></span>
             </div>
         </div>
-        <?php endforeach; else: ?>
-            <div class="dr-empty">
-                <p class="text-xs font-bold uppercase tracking-widest">
-                    <?php if ($scanHasFilters): ?>
-                        No <?= htmlspecialchars($scanTab) ?> AI scans match these filters.
-                    <?php elseif ($scanTab === 'resolved'): ?>
-                        No resolved AI scans yet.
-                    <?php else: ?>
-                        No verified AI scans right now. New scans from the app appear here automatically.
-                    <?php endif; ?>
-                </p>
-            </div>
-        <?php endif; ?>
+        <?php endforeach; ?>
+        <div id="scanTabEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No AI scans in this category match the current filters.</p></div>
     </div>
 
     <div id="scanSearchEmpty" class="dr-empty hidden"><p class="text-xs font-bold uppercase tracking-widest">No scans match your search</p></div>
@@ -2101,15 +2090,47 @@ $scanTabQs = function ($tab) use ($filterBarangayId, $filterDateFrom, $filterDat
 <script>
 // Instant client-side search across the scans already loaded on this page.
 function renderScanPage(page, scrollToList) {
-    window.casePaginate({
-        panel: document.getElementById('scanPanel'), rowSel: '.scan-row', inputSel: '#scanSearchInput',
-        emptySel: '#scanSearchEmpty', pagerSel: '#scanPager', listSel: '#scanList',
-        page: page, scroll: scrollToList, scrollSel: '#scanList', noun: 'scans'
+    var panel = document.getElementById('scanPanel');
+    var tab = panel.dataset.tab || 'verified';
+    var inTab = 0;
+    panel.querySelectorAll('.scan-row').forEach(function (row) {
+        if (tab === 'all' || row.dataset.status === tab) inTab++;
     });
+    window.casePaginate({
+        panel: panel, rowSel: '.scan-row', inputSel: '#scanSearchInput',
+        emptySel: '#scanSearchEmpty', pagerSel: '#scanPager', listSel: '#scanList',
+        page: page, scroll: scrollToList, scrollSel: '#scanList', noun: 'scans',
+        rowFilter: function (row) { return tab === 'all' || row.dataset.status === tab; }
+    });
+    document.getElementById('scanTabEmpty').classList.toggle('hidden', inTab > 0);
+    if (!inTab) document.getElementById('scanSearchEmpty').classList.add('hidden');
+}
+function scanSetTab(tab, updateUrl) {
+    if (!['all', 'verified', 'resolved'].includes(tab)) tab = 'verified';
+    var panel = document.getElementById('scanPanel');
+    panel.dataset.tab = tab;
+    panel.querySelectorAll('[data-scan-tab]').forEach(function (link) {
+        link.classList.toggle('dr-tab-active', link.dataset.scanTab === tab);
+        link.setAttribute('aria-current', link.dataset.scanTab === tab ? 'page' : 'false');
+    });
+    panel.querySelector('input[name="tab"]').value = tab;
+    renderScanPage(1, false);
+    if (updateUrl !== false) {
+        var url = new URL(location.href);
+        url.searchParams.set('view', 'scans');
+        url.searchParams.set('tab', tab);
+        history.replaceState({ reportView: 'scans' }, '', url.href);
+    }
 }
 // Typing in the search box goes back to page 1 of the matches.
 function filterScanRows() { renderScanPage(1, false); }
 document.addEventListener('click', function (e) {
+    var tabLink = e.target.closest('#scanPanel [data-scan-tab]');
+    if (tabLink && e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        scanSetTab(tabLink.dataset.scanTab);
+        return;
+    }
     var btn = e.target.closest('#scanPanel .dr-pager-btn');
     if (!btn || btn.disabled || btn.classList.contains('active')) return;
     renderScanPage(parseInt(btn.dataset.page, 10), true);
@@ -2235,11 +2256,14 @@ window.addEventListener('DOMContentLoaded', function () {
     if (t) { t.scrollIntoView({ behavior: 'smooth', block: 'center' }); t.click(); }
 });
 </script>
-<?php endif; // end $view === 'scans' ?>
+</section>
+<?php endif; // end scans section ?>
 
-<?php if ($view === 'farm'): ?>
+<?php if (!$isAjax || $view === 'farm'): ?>
+<section data-report-view="farm" style="<?= $view === 'farm' ? '' : 'display:none' ?>">
 <?php render_planting_harvesting_section($conn); ?>
-<?php endif; // end $view === 'farm' ?>
+</section>
+<?php endif; // end farm section ?>
 
 <?php
 $allDiseasesForPicker = [];
@@ -2555,6 +2579,7 @@ window.addEventListener('DOMContentLoaded', function() {
 
     // Support the browser's Back/Forward buttons for tab/filter changes.
     window.addEventListener('popstate', function () {
+        if ((new URLSearchParams(location.search).get('view') || 'disease') !== 'disease') return;
         loadPanel(window.location.href, false);
     });
 })();
@@ -2624,14 +2649,10 @@ window.addEventListener('DOMContentLoaded', function() {
 
 <?php if (!$isAjax): ?>
 <?php
-// PRERENDER (Chrome / Edge): while the person looks at one view, the browser can get the other two views
-// ready in the background, so clicking a card shows the page instantly. Other browsers ignore this.
-// "moderate" = starts when the pointer rests on a card; change to "eager" to prepare them straight away.
-$casdSpecUrls = [];
+// All three views stay mounted; navigation changes visibility and history only.
 $casdBasePath = strtok($_SERVER['REQUEST_URI'] ?? 'reports.php', '?');
-foreach (['disease', 'farm', 'scans'] as $__v) { if ($__v !== $view) { $casdSpecUrls[] = $casdBasePath . '?view=' . $__v; } }
 ?>
-<script type="speculationrules"><?= json_encode(['prerender' => [['urls' => $casdSpecUrls, 'eagerness' => 'moderate']]], JSON_UNESCAPED_SLASHES) ?></script>
+<script src="includes/report-views.js"></script>
 
 <!-- ═══ LIVE NEW-REPORT CHECK ═══
      Every few seconds (only while this tab is visible) asks reports_poll.php whether anything changed.
@@ -2648,7 +2669,12 @@ foreach (['disease', 'farm', 'scans'] as $__v) { if ($__v !== $view) { $casdSpec
     var seen      = <?= json_encode($casdSig) ?>;
     var section   = VIEW === 'disease' ? 'disease' : (VIEW === 'scans' ? 'scans' : 'farm');
     var wasPrerendered = !!document.prerendering;
-    var userTouched = false, busy = false, timer = null, banner = null, ownWriteAt = 0;
+    var userTouched = false, busy = false, timer = null, banner = null, ownWriteAt = 0, staleViews = {};
+    window.addEventListener('casd:report-view', function (event) {
+        section = event.detail.view;
+        if (banner && banner.parentNode) banner.parentNode.removeChild(banner);
+        if (staleViews[section]) handleCurrent(staleViews[section]);
+    });
 
     // Remember when THIS person last saved something (accept / reject / send ...), so their own change is not
     // announced back to them as "new reports".
@@ -2703,6 +2729,7 @@ foreach (['disease', 'farm', 'scans'] as $__v) { if ($__v !== $view) { $casdSpec
             if (modalOpen()) return;                       // try again on the next check; don't disturb an open report
             if (!window.drSilentRefresh()) return;         // a refresh is already running
             seen[section] = newSig;      // list refreshed quietly -- no banner
+            delete staleViews[section];
             return;
         }
         seen[section] = newSig;
@@ -2711,6 +2738,7 @@ foreach (['disease', 'farm', 'scans'] as $__v) { if ($__v !== $view) { $casdSpec
     }
 
     function check() {
+        section = window.casdReportView || VIEW;
         if (busy || document.hidden || document.prerendering) return;
         busy = true;
         fetch(POLL_URL + '?since=' + encodeURIComponent(JSON.stringify(seen)), {
@@ -2723,7 +2751,7 @@ foreach (['disease', 'farm', 'scans'] as $__v) { if ($__v !== $view) { $casdSpec
             Object.keys(data.sig).forEach(function (k) {
                 var now = data.sig[k], before = seen[k];
                 if (!now || !before || now === before) { if (now && !before) seen[k] = now; return; }
-                if (k === section) { handleCurrent(now); } else { seen[k] = now; }
+                if (k === section) { handleCurrent(now); } else { staleViews[k] = now; seen[k] = now; }
             });
         })
         .catch(function () { /* offline / session expired: try again next time */ })

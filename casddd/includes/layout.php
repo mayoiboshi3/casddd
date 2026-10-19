@@ -20,6 +20,7 @@ if (!isset($pageTitle)) $pageTitle = "Corn Portal";
 
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <?php include __DIR__ . '/site-navigation.php'; ?>
 
     <style>
         body { font-family: 'Inter', sans-serif; background-color: #f8fafc; overflow: hidden; }

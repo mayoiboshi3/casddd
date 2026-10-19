@@ -103,6 +103,10 @@ if (session_status() === PHP_SESSION_ACTIVE) {
     var toasts, badges = [];
     var page = location.pathname.replace(/.*\//, '');
     var curView = page === 'reports.php' ? (new URLSearchParams(location.search).get('view') || 'disease') : null;
+    window.addEventListener('casd:report-view', function (event) {
+        curView = event.detail.view;
+        clearCurrentView(); render(); highlightRows();
+    });
 
     function load() {
         try { var s = JSON.parse(localStorage.getItem(KEY) || 'null'); if (s && Array.isArray(s.items)) return s; } catch (e) {}
