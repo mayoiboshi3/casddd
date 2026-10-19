@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/includes/data_cache.php';
+
 /**
  * NEW FIELD CASE REPORT
  * ----------------------------------------------------------------------
@@ -85,7 +87,18 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
     $ref_id       = "REF-" . date("Y") . "-" . strtoupper(substr(md5(time()), 0, 4));
     // Personnel log: the staff member creating this case by hand (0 = could not be determined).
     $reported_by  = (int) personnel_log_current_user_id($conn);
+<<<<<<< Updated upstream
     $farmer_name  = mysqli_real_escape_string($conn, $_POST['farmer_name']);
+=======
+    // Farmer is stored in the proper farmer_id column (the dropdown now submits the id),
+    // NOT inside the description text.
+    $farmer_id    = (int) ($_POST['farmer_id'] ?? 0);
+    $fchk         = $farmer_id > 0 ? cached_query($conn, "SELECT farmer_id FROM farmers WHERE farmer_id = $farmer_id LIMIT 1") : false;
+    if (!$fchk || cached_num_rows($fchk) !== 1) {
+        ncr_notice('warning', 'Select a Farmer', 'Please select a valid farmer before submitting.');
+        exit;
+    }
+>>>>>>> Stashed changes
     $brgy_id      = mysqli_real_escape_string($conn, $_POST['brgy_id']);
     $stage        = mysqli_real_escape_string($conn, $_POST['growth_stage']);
     $date_planted = mysqli_real_escape_string($conn, $_POST['date_planted']);
@@ -129,7 +142,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
             (reference_id, disease_id, farm_id, farmer_id, barangay_id, reported_by, growth_stage, date_planted, description, severity, photo_evidence, status, report_date)
             VALUES ('$ref_id', '$d_id', 0, 0, '$brgy_id', $reported_by, '$stage', '$date_planted', '$full_desc', '$severity', $photo_evidence_val, 'pending', NOW())";
 
-        if (mysqli_query($conn, $insertQuery)) {
+        if (cached_query($conn, $insertQuery)) {
             $insertedCount++;
         }
     }
@@ -151,8 +164,8 @@ function render_new_case_report_modal($conn, $today, $minDate) {
 
     // Corn growth stages, needed only for this form's auto growth-stage calculator
     $stages_data  = [];
-    $stages_query = mysqli_query($conn, "SELECT * FROM corn_stages ORDER BY min_days_white ASC");
-    while ($s = mysqli_fetch_assoc($stages_query)) {
+    $stages_query = cached_query($conn, "SELECT * FROM corn_stages ORDER BY min_days_white ASC");
+    while ($s = cached_fetch_assoc($stages_query)) {
         $stages_data[] = $s;
     }
     ?>
@@ -237,9 +250,15 @@ function render_new_case_report_modal($conn, $today, $minDate) {
                                 <select name="farmer_name" required class="field-input">
                                     <option value="" disabled selected>— Select farmer —</option>
                                     <?php
+<<<<<<< Updated upstream
                                     $farmers = mysqli_query($conn, "SELECT farmer_name FROM farmers ORDER BY farmer_name ASC");
                                     while ($f = mysqli_fetch_assoc($farmers)) {
                                         echo "<option value='" . htmlspecialchars($f['farmer_name'], ENT_QUOTES) . "'>" . htmlspecialchars($f['farmer_name']) . "</option>";
+=======
+                                    $farmers = cached_query($conn, "SELECT farmer_id, farmer_name FROM farmers ORDER BY farmer_name ASC");
+                                    while ($f = cached_fetch_assoc($farmers)) {
+                                        echo "<option value='" . (int)$f['farmer_id'] . "'>" . htmlspecialchars($f['farmer_name']) . "</option>";
+>>>>>>> Stashed changes
                                     } ?>
                                 </select>
                             </div>
@@ -248,8 +267,8 @@ function render_new_case_report_modal($conn, $today, $minDate) {
                                 <select name="brgy_id" required class="field-input">
                                     <option value="" disabled selected>— Select barangay —</option>
                                     <?php
-                                    $brgy_q = mysqli_query($conn, "SELECT id, name FROM barangays ORDER BY name ASC");
-                                    while ($b = mysqli_fetch_assoc($brgy_q)) {
+                                    $brgy_q = cached_query($conn, "SELECT id, name FROM barangays ORDER BY name ASC");
+                                    while ($b = cached_fetch_assoc($brgy_q)) {
                                         echo "<option value='{$b['id']}'>" . htmlspecialchars($b['name']) . "</option>";
                                     } ?>
                                 </select>
@@ -271,8 +290,8 @@ function render_new_case_report_modal($conn, $today, $minDate) {
                         </button>
                         <div class="grid grid-cols-2 gap-2.5 mt-4" id="ncrDiseaseGrid">
                             <?php
-                            $diseases = mysqli_query($conn, "SELECT disease_id, disease_name FROM diseases WHERE disease_id != 999 ORDER BY disease_name ASC");
-                            while ($d = mysqli_fetch_assoc($diseases)) { ?>
+                            $diseases = cached_query($conn, "SELECT disease_id, disease_name FROM diseases WHERE disease_id != 999 ORDER BY disease_name ASC");
+                            while ($d = cached_fetch_assoc($diseases)) { ?>
                             <label class="disease-check-card">
                                 <input type="checkbox"
                                        class="ncr-disease-checkbox"

@@ -1,11 +1,55 @@
-<?php 
+<?php
+require_once __DIR__ . '/includes/data_cache.php';
+
 // Buffer this page's output. includes/layout.php prints the page shell (sidebar, header) BEFORE the
 // Accept/Reject handler in planting_harvesting.php runs; buffering lets that handler throw the shell
 // away and answer the browser's fetch() with pure JSON. Normal page loads are unaffected.
 ob_start();
+<<<<<<< Updated upstream
 require_once __DIR__ . "/src/db_config.php"; 
 $pageTitle = "Reports"; 
 include "includes/layout.php"; 
+=======
+require_once __DIR__ . "/src/db_config.php";
+
+// ── DISPLAY-TIME SETTINGS (must be defined BEFORE the message handlers below run) ──
+// Hours from UTC that times are shown in (8 = Philippine time).
+if (!defined('CASD_DISPLAY_UTC_OFFSET_HOURS')) { define('CASD_DISPLAY_UTC_OFFSET_HOURS', 8); }
+// Timezone the FARMER APP uses when it writes the "created_at" inside a reply (hours from UTC). It is 0 (UTC)
+// today. If you later set Philippine time in the farmer app's own database config too, change this to 8.
+if (!defined('CASD_FARMER_APP_UTC_OFFSET_HOURS')) { define('CASD_FARMER_APP_UTC_OFFSET_HOURS', 0); }
+
+// PERFORMANCE: true when the page is being fetched by the in-page filter/tab switcher.
+$isAjax = (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest');
+// PERFORMANCE: on filter/tab requests, skip the page shell (includes/layout.php -> sidebar, header)
+// and everything after the #drPanel block. The login check is NOT skipped: layout.php only does it
+// through src/session_guard.php, which is required directly below. Set to false to go back to the
+// original behaviour.
+$CASD_AJAX_SKIP_LAYOUT = true;
+
+// Folder (relative to this page, or a full URL path) where the AI scan photos are shown from.
+// CHANGE THIS to move the scan photos, e.g. 'uploads/scan_results' or 'scans/images'.
+define('SCAN_PHOTO_DIR', 'corn_api/uploads/scan_results');
+$pageTitle = "Reports";
+if ($isAjax && $CASD_AJAX_SKIP_LAYOUT) {
+    require_once __DIR__ . "/src/session_guard.php";   // same login check layout.php runs
+} else {
+    include "includes/layout.php";
+}
+
+// ── AUTO-FILL MISSING BARANGAY ON CASES ──────────────────────────────────────
+// Runs on every load of this page (after the login check above). Any disease case whose barangay_id
+// is NULL gets the barangay of the farmer it belongs to (disease_cases.farmer_id -> farmers.barangay_id).
+// updated_at is set to itself so this background fix doesn't change the case's "last updated" time.
+if (isset($conn) && $conn) {
+    cached_query($conn, "UPDATE disease_cases dc
+                         INNER JOIN farmers f ON f.farmer_id = dc.farmer_id
+                         SET dc.barangay_id = f.barangay_id,
+                             dc.updated_at  = dc.updated_at
+                         WHERE dc.barangay_id IS NULL
+                           AND f.barangay_id IS NOT NULL");
+}
+>>>>>>> Stashed changes
 
 // ── STYLED DIALOGS (replaces native alert()) ─────────────────────────────────
 // casd_dialog_assets() prints the dialog CSS + JS once. It also overrides window.alert,
@@ -208,6 +252,53 @@ if ($col_check && mysqli_num_rows($col_check) === 0) {
 $manualOnlySql   = "`source` = 'manual_report'";
 $manualOnlySqlDc = "dc.`source` = 'manual_report'";
 
+// --- PERSONNEL LOG FOR AI SCANS: who scanned, who/what verified, who resolved ---
+// Verification is done by the AI (not a staff member); the resolver comes from the same personnel log
+// the Disease Reports use (personnel_log_build). Best-effort lookup of a person's name by step.
+function casd_scan_find_person($row, $needle) {
+    try { $p = personnel_log_build($row); } catch (Throwable $e) { return null; }
+    if (!is_array($p)) { return null; }
+    $pick = function ($v) {
+        if (is_string($v) && trim($v) !== '') { return trim($v); }
+        if (is_array($v)) {
+            foreach (['name', 'full_name', 'fullname', 'user_name', 'username', 'by', 'user', 'person'] as $k) {
+                if (!empty($v[$k]) && is_string($v[$k])) { return trim($v[$k]); }
+            }
+        }
+        return null;
+    };
+    foreach ($p as $k => $v) {
+        if (is_string($k) && stripos($k, $needle) !== false) { $n = $pick($v); if ($n) { return $n; } }
+        if (is_array($v)) {
+            $tag = '';
+            foreach (['label', 'type', 'action', 'step', 'key', 'status'] as $tk) { if (!empty($v[$tk]) && is_string($v[$tk])) { $tag .= ' ' . $v[$tk]; } }
+            if ($tag !== '' && stripos($tag, $needle) !== false) { $n = $pick($v); if ($n) { return $n; } }
+        }
+    }
+    return null;
+}
+function casd_scan_personnel($row, $farmer) {
+    $fmt = function ($ts) { return $ts ? date('M d, Y g:i A', strtotime($ts)) : null; };
+    $log = [];
+    $log[] = ['label' => 'Scanned by',  'name' => $farmer, 'at' => $fmt($row['report_date'] ?? null)];
+    $log[] = ['label' => 'Verified by', 'name' => 'AI (automatic)', 'at' => $fmt(!empty($row['verified_at']) ? $row['verified_at'] : ($row['report_date'] ?? null))];
+    if (($row['status'] ?? '') === 'resolved') {
+        $who = casd_scan_find_person($row, 'resolv');
+        if (!$who && (int)($row['resolved_by'] ?? 0) > 0) { $who = 'CASD staff'; }
+        $log[] = ['label' => 'Resolved by', 'name' => $who ?: '—', 'at' => $fmt($row['resolved_at'] ?? null)];
+    }
+    return $log;
+}
+
+// --- AI SCANS ARE VERIFIED AUTOMATICALLY ---
+// The AI identifying the disease IS the verification, so a scan never waits for CASD review.
+// The database trigger in ai_scan_auto_verify.sql does this the moment the app inserts the row;
+// this is the safety net for any scan that still arrives as 'pending' (no trigger, older app build).
+// verified_by stays empty on purpose: nobody at CASD verified it, the AI did.
+cached_query($conn, "UPDATE disease_cases
+    SET status = 'verified', verified_at = COALESCE(verified_at, NOW()), verified_date = COALESCE(verified_date, CURDATE())
+    WHERE `source` = 'scan' AND status = 'pending'");
+
 // --- PERSONNEL LOG: who created / verified / rejected each case. Exposes the
 // helpers used below (needs verified_at / rejected_by / rejected_at / resolved_by / resolved_at on disease_cases).
 require_once __DIR__ . "/personnel_log.php";
@@ -240,6 +331,132 @@ $STATUS_FLOW = [
     'rejected' => ['rejected'],
 ];
 
+<<<<<<< Updated upstream
+=======
+// ── Shared helper: fill in the real disease(s) for a Pending "Other / Unidentified" report ──
+// Used by "Save Status Update" (update_case) so nothing is written until the reviewer saves.
+// 1st picked disease reuses this row's disease_id; extra picks (2nd, 3rd) are cloned rows that
+// share the same reference_id, so the report stays ONE file. Columns are read via SHOW COLUMNS
+// so cloning keeps working if disease_cases gains new columns.
+// Returns true if something was applied, false if the case was not eligible / nothing valid picked.
+function casd_reassign_unidentified_disease($conn, $case_id, array $rawIds) {
+    $case_id = (int) $case_id;
+    $new_disease_ids = [];
+    foreach ($rawIds as $rawId) {
+        $id = (int) trim((string) $rawId);
+        if ($id > 0 && $id !== 999 && !in_array($id, $new_disease_ids, true)) {
+            $new_disease_ids[] = $id;
+        }
+    }
+    $new_disease_ids = array_slice($new_disease_ids, 0, 3);   // max 3 diseases
+
+    $cur_q   = cached_query($conn, "SELECT * FROM disease_cases WHERE case_id = $case_id LIMIT 1");
+    $cur_row = $cur_q ? cached_fetch_assoc($cur_q) : null;
+
+    $isEligible = $cur_row
+        && in_array($cur_row['status'], ['pending', 'verified'], true)   // identify before resolving: allowed while Pending or Verified
+        && in_array((int)($cur_row['disease_id'] ?? 0), [0, 999], true)   // 999 = web form "Other", 0/empty = mobile app with no disease
+        && !empty($new_disease_ids);
+    if (!$isEligible) return false;
+
+    // Only accept ids that really exist in the diseases table
+    $idList = implode(',', $new_disease_ids);
+    $okQ = cached_query($conn, "SELECT disease_id FROM diseases WHERE disease_id IN ($idList)");
+    $valid = [];
+    if ($okQ) { while ($r = cached_fetch_assoc($okQ)) { $valid[] = (int)$r['disease_id']; } }
+    $new_disease_ids = array_values(array_filter($new_disease_ids, fn($i) => in_array($i, $valid, true)));
+    if (empty($new_disease_ids)) return false;
+
+    $first_disease_id = array_shift($new_disease_ids);
+    cached_query($conn, "UPDATE disease_cases SET disease_id = $first_disease_id, updated_at = NOW() WHERE case_id = $case_id");
+
+    if (!empty($new_disease_ids)) {
+        $cols_q = cached_query($conn, "SHOW COLUMNS FROM disease_cases");
+        $allCols = [];
+        if ($cols_q) { while ($c = cached_fetch_assoc($cols_q)) { $allCols[] = $c['Field']; } }
+        $cloneCols = array_filter($allCols, function ($c) { return $c !== 'case_id'; });
+
+        foreach ($new_disease_ids as $extra_disease_id) {
+            $selectParts = [];
+            foreach ($cloneCols as $c) {
+                if ($c === 'disease_id')      { $selectParts[] = (int)$extra_disease_id . " AS `disease_id`"; }
+                elseif ($c === 'updated_at')  { $selectParts[] = "NOW() AS `updated_at`"; }
+                else                          { $selectParts[] = "`$c`"; }
+            }
+            $insertColsSql = implode(',', array_map(function ($c) { return "`$c`"; }, $cloneCols));
+            $selectSql     = implode(',', $selectParts);
+            cached_query($conn, "INSERT INTO disease_cases ($insertColsSql) SELECT $selectSql FROM disease_cases WHERE case_id = $case_id");
+        }
+    }
+    return true;
+}
+
+// ── LIVE MESSAGING HELPERS (used by the review popup's chat; no page reloads) ──
+// casd_json_exit(): throw away the buffered page shell and answer with pure JSON.
+function casd_json_exit(array $payload) {
+    while (ob_get_level() > 0) { ob_end_clean(); }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+// casd_case_chat_state(): the full conversation + the few case fields the chat UI mirrors, plus a
+// signature ("sig") so the browser can ask "anything new?" and get a tiny reply when nothing changed.
+function casd_case_chat_state($conn, $case_id) {
+    $case_id = (int) $case_id;
+    $q   = cached_query($conn, "SELECT case_id, status, recommendation_text, recommendation_sent, recommendation_sent_at,
+                                       farmer_reply_text, farmer_reply_at, follow_up_date
+                                FROM disease_cases WHERE case_id = $case_id LIMIT 1");
+    $row = $q ? cached_fetch_assoc($q) : null;
+    if (!$row) return null;
+    $state = [
+        'case_id'                => $case_id,
+        'status'                 => $row['status'],
+        'messages'               => buildCaseMessages($conn, $row),
+        'follow_up_date'         => $row['follow_up_date'] ?: null,
+        'recommendation_sent'    => (int) $row['recommendation_sent'],
+        'recommendation_sent_at' => casd_ph_time($conn, $row['recommendation_sent_at']),
+    ];
+    $state['sig'] = md5(json_encode($state, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
+    return $state;
+}
+// Polling endpoint: reports.php?msg_poll=1&case_id=N&sig=LAST_SEEN_SIG
+if ($_SERVER["REQUEST_METHOD"] === "GET" && isset($_GET['msg_poll'])) {
+    $state = casd_case_chat_state($conn, (int) ($_GET['case_id'] ?? 0));
+    if (!$state) { casd_json_exit(['ok' => false, 'error' => 'Case not found.']); }
+    if ($state['sig'] === (string) ($_GET['sig'] ?? '')) { casd_json_exit(['ok' => true, 'changed' => false]); }
+    casd_json_exit(['ok' => true, 'changed' => true] + $state);
+}
+
+// 1b. RESOLVE AN AI SCAN (AI Scans view). Scans are already Verified, so the only step left is Resolved.
+// Every row sharing the scan's reference_id is resolved together, same as Disease Reports.
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['resolve_scan'])) {
+    $scanId = (int)($_POST['case_id'] ?? 0);
+    $sq     = cached_query($conn, "SELECT reference_id, status FROM disease_cases WHERE case_id = $scanId AND `source` = 'scan' LIMIT 1");
+    $sRow   = $sq ? cached_fetch_assoc($sq) : null;
+    if ($sRow && in_array($sRow['status'], ['pending', 'verified'], true)) {
+        $actorId  = personnel_log_current_user_id($conn);
+        $actorSql = $actorId > 0 ? (int)$actorId : 'NULL';
+        $sRef     = trim((string)$sRow['reference_id']);
+        $sWhere   = $sRef !== ''
+            ? "reference_id = '" . mysqli_real_escape_string($conn, $sRef) . "' AND `source` = 'scan'"
+            : "case_id = $scanId";
+        $ok = cached_query($conn, "UPDATE disease_cases
+            SET status = 'resolved', resolved_by = $actorSql, resolved_at = NOW(), updated_at = NOW(),
+                verified_at = COALESCE(verified_at, NOW()), verified_date = COALESCE(verified_date, CURDATE())
+            WHERE $sWhere AND status IN ('pending','verified')");
+        if ($ok) {
+            casd_alert_redirect('success', 'Status Updated', 'The scan was marked as resolved successfully.', 'reports.php?view=scans&tab=resolved', 2200);
+            exit;
+        }
+        casd_alert_redirect('error', 'Could Not Resolve', 'Something went wrong while saving. Please try again.', 'reports.php?view=scans');
+        exit;
+    }
+    casd_alert_redirect('warning', 'Action Not Available', 'This scan is already resolved or could not be found.', 'reports.php?view=scans&tab=resolved');
+    exit;
+}
+
+>>>>>>> Stashed changes
 // 2. HANDLE DATABASE UPDATE
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
     $new_status = mysqli_real_escape_string($conn, $_POST['status']);
@@ -252,8 +469,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
     // reference_id: a report with 2-3 diseases selected is several rows sharing
     // one reference_id, and a status change now applies to that whole group at
     // once, not just this one row — so the report stays and moves as ONE file.
-    $cur_q      = mysqli_query($conn, "SELECT status, disease_id, reference_id FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
-    $cur_row    = $cur_q ? mysqli_fetch_assoc($cur_q) : null;
+    $cur_q      = cached_query($conn, "SELECT status, disease_id, reference_id FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
+    $cur_row    = $cur_q ? cached_fetch_assoc($cur_q) : null;
     $cur_status = $cur_row['status'] ?? null;
     $reference_id = $cur_row['reference_id'] ?? null;
     $allowedNext = $STATUS_FLOW[$cur_status] ?? [];
@@ -274,6 +491,32 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
 
     if ($cur_status !== null && $reference_id !== null && in_array($new_status, $allowedNext, true)) {
         $ref_esc = mysqli_real_escape_string($conn, $reference_id);
+<<<<<<< Updated upstream
+=======
+
+        // Disease chosen in the picker for an Other / Unidentified report. It is only held in
+        // the modal until now — saved here together with the status + severity, so nothing is
+        // written unless "Save Status Update" is confirmed. (Skipped when rejecting.)
+        $pendingDiseaseIds = trim((string) ($_POST['reassign_disease_ids'] ?? ''));
+        if ($pendingDiseaseIds !== '' && $new_status !== 'rejected') {
+            casd_reassign_unidentified_disease($conn, (int) $case_id, explode(',', $pendingDiseaseIds));
+        }
+
+        // A report that is still "Other / Unidentified" (disease_id 999) or has no disease (0 / empty, from the mobile
+        // app) can NOT be resolved: the disease must be identified first. Checked after the picker's choice above has
+        // been saved, so picking a disease and resolving in the same save still works. (Verifying is not restricted.)
+        if ($new_status === 'resolved') {
+            $chk_q   = cached_query($conn, "SELECT disease_id FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
+            $chk_row = $chk_q ? cached_fetch_assoc($chk_q) : null;
+            if (!$chk_row || in_array((int)($chk_row['disease_id'] ?? 0), [0, 999], true)) {
+                casd_alert_redirect('warning', 'Identify the Disease First',
+                    "This report is still Unidentified.\nPick the correct disease first, then resolve it.",
+                    'reports.php?view=disease&tab=' . ($cur_status ?? 'verified') . '&case_id=' . (int)$case_id);
+                exit;
+            }
+        }
+
+>>>>>>> Stashed changes
         // WHERE reference_id (not case_id) — every disease row under this report
         // is verified / resolved / rejected together, as one unit.
         // Personnel log: record WHO moved the case, but only when the status really changes
@@ -291,7 +534,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_case'])) {
             }
         }
         $updateQuery = "UPDATE disease_cases SET status = '$new_status', remarks = '$remarks', updated_at = NOW() $severitySql $personnelSql WHERE reference_id = '$ref_esc'";
-        if(mysqli_query($conn, $updateQuery)) {
+        if(cached_query($conn, $updateQuery)) {
             casd_alert_redirect('success', 'Status Updated', 'The case status and remarks were saved successfully.', 'reports.php?view=disease&tab=' . $new_status, 2200);
             exit;
         }
@@ -391,6 +634,24 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
     $rec_text        = mysqli_real_escape_string($conn, $_POST['recommendation_text']);
     $tab_return      = mysqli_real_escape_string($conn, $_POST['return_tab'] ?? 'verified');
     $has_rec         = ($_POST['has_recommendation'] ?? '0') === '1';
+<<<<<<< Updated upstream
+=======
+    // ajax=1 -> the review popup sent this in the background: answer with JSON instead of reloading the page.
+    $wantsJson       = (($_POST['ajax'] ?? '') === '1');
+    if ($wantsJson && trim((string) ($_POST['recommendation_text'] ?? '')) === '') {
+        casd_json_exit(['ok' => false, 'error' => 'The message is empty.']);
+    }
+    // A Resolved case is read-only: its conversation can be viewed, but nothing more can be sent
+    // (messages, treatment recommendations, or inspection schedule / cancel notices). Enforced here
+    // as well as in the UI so it can't be bypassed.
+    $st_q   = cached_query($conn, "SELECT status FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
+    $st_row = $st_q ? cached_fetch_assoc($st_q) : null;
+    if ($st_row && $st_row['status'] === 'resolved') {
+        if ($wantsJson) { casd_json_exit(['ok' => false, 'error' => 'This case is resolved — messages can no longer be sent.']); }
+        casd_alert_redirect('warning', 'Case Resolved', 'This case is resolved. The conversation is read-only.', 'reports.php?view=disease&tab=resolved&case_id=' . $case_id);
+        exit;
+    }
+>>>>>>> Stashed changes
 
     // Field Inspection scheduling — review.php's pinned scheduler posts these two
     // hidden fields alongside every recommendation send:
@@ -407,27 +668,27 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
         $follow_up_sql = ", follow_up_date = '$follow_up_esc'";
     }
 
-    $sendQuery = "UPDATE disease_cases 
+    $sendQuery = "UPDATE disease_cases
                   SET recommendation_text = '$rec_text', recommendation_sent = 1, recommendation_sent_at = NOW() $follow_up_sql
                   WHERE case_id = '$case_id'";
-    if (mysqli_query($conn, $sendQuery)) {
+    if (cached_query($conn, $sendQuery)) {
         if ($has_rec) {
             // Look up this row's reference_id + observation, then pull EVERY disease
             // sharing that reference_id (a report with 2-3 diseases selected is several
             // rows) so the findings message lists all of them as one combined block,
             // not just the disease tied to this representative row.
-            $findings_q = mysqli_query($conn, "SELECT reference_id, description FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
-            $findings_row = $findings_q ? mysqli_fetch_assoc($findings_q) : null;
+            $findings_q = cached_query($conn, "SELECT reference_id, description FROM disease_cases WHERE case_id = '$case_id' LIMIT 1");
+            $findings_row = $findings_q ? cached_fetch_assoc($findings_q) : null;
             if ($findings_row) {
                 $ref_esc = mysqli_real_escape_string($conn, $findings_row['reference_id']);
-                $group_q = mysqli_query($conn, "SELECT d.disease_name, d.description AS disease_description
+                $group_q = cached_query($conn, "SELECT d.disease_name, d.description AS disease_description
                                                   FROM disease_cases dc
                                                   LEFT JOIN diseases d ON dc.disease_id = d.disease_id
                                                   WHERE dc.reference_id = '$ref_esc'
                                                   ORDER BY dc.case_id ASC");
                 $diseaseBlocks = [];
                 if ($group_q) {
-                    while ($g = mysqli_fetch_assoc($group_q)) {
+                    while ($g = cached_fetch_assoc($group_q)) {
                         $gName = $g['disease_name'] ?: 'Hindi tiyak';
                         $gDesc = trim($g['disease_description'] ?? '');
                         if ($gDesc === '') { $gDesc = 'Walang detalyadong paglalarawan para sa sakit na ito.'; }
@@ -442,10 +703,18 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['send_recommendation'])
                 $findingsHeader = count($diseaseBlocks) > 1 ? "Natukoy na mga Sakit:\n\n" : "Natukoy na Sakit:\n\n";
                 $findingsMsg = mysqli_real_escape_string($conn,
                     $findingsHeader . implode("\n\n", $diseaseBlocks) . "\n\nObserbasyon sa Bukid: {$caseDesc}");
-                mysqli_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$findingsMsg')");
+                cached_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$findingsMsg')");
             }
         }
+<<<<<<< Updated upstream
         mysqli_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$rec_text')");
+=======
+        $msgOk = cached_query($conn, "INSERT INTO case_messages (case_id, sender, message_text) VALUES ('$case_id', 'staff', '$rec_text')");
+        if ($wantsJson) {
+            $state = casd_case_chat_state($conn, (int) $case_id);
+            casd_json_exit(($msgOk && $state) ? ['ok' => true] + $state : ['ok' => false, 'error' => 'The message could not be saved.']);
+        }
+>>>>>>> Stashed changes
         echo "<script>window.location='reports.php?view=disease&tab=" . $tab_return . "&case_id=" . $case_id . "&open_msg=1';</script>";
         exit;
     }
@@ -526,13 +795,42 @@ function diseaseRowSlice($row) {
     ];
 }
 
+<<<<<<< Updated upstream
+=======
+// PERFORMANCE: one query loads the messages for every case in the list, instead of one query per row.
+$GLOBALS['__casdMsgCache'] = [];
+function preloadCaseMessages($conn, array $caseIds) {
+    $ids = array_values(array_unique(array_filter(array_map('intval', $caseIds))));
+    if (!$ids) return;
+    foreach ($ids as $id) { $GLOBALS['__casdMsgCache'][$id] = []; }
+    $q = cached_query($conn, "SELECT case_id, sender, message_text, created_at
+                              FROM case_messages
+                              WHERE case_id IN (" . implode(',', $ids) . ")
+                              ORDER BY created_at ASC, message_id ASC");
+    if ($q) {
+        while ($r = cached_fetch_assoc($q)) {
+            $GLOBALS['__casdMsgCache'][(int)$r['case_id']][] = [
+                'sender'     => $r['sender'],
+                'message'    => $r['message_text'],
+                'created_at' => $r['created_at'],
+            ];
+        }
+    }
+}
+
+>>>>>>> Stashed changes
 // Helper: load every logged message for a case, oldest first (the chat thread)
 function fetchCaseMessages($conn, $case_id) {
     $messages = [];
     $case_id  = (int)$case_id;
+<<<<<<< Updated upstream
     $q = mysqli_query($conn, "SELECT sender, message_text, created_at FROM case_messages WHERE case_id = $case_id ORDER BY created_at ASC, message_id ASC");
+=======
+    if (isset($GLOBALS['__casdMsgCache'][$case_id])) { return $GLOBALS['__casdMsgCache'][$case_id]; }
+    $q = cached_query($conn, "SELECT sender, message_text, created_at FROM case_messages WHERE case_id = $case_id ORDER BY created_at ASC, message_id ASC");
+>>>>>>> Stashed changes
     if ($q) {
-        while ($r = mysqli_fetch_assoc($q)) {
+        while ($r = cached_fetch_assoc($q)) {
             $messages[] = [
                 'sender'     => $r['sender'],
                 'message'    => $r['message_text'],
@@ -543,6 +841,41 @@ function fetchCaseMessages($conn, $case_id) {
     return $messages;
 }
 
+<<<<<<< Updated upstream
+=======
+// ── PHILIPPINE TIME FOR DISPLAY ──
+// The database server stamps rows (NOW() / CURRENT_TIMESTAMP) in ITS own timezone — UTC here, which is why a
+// message sent at 12:22 PM in the Philippines showed as 04:22. The farmer app's replies are stamped by the same
+// server. These helpers convert such "database time" strings to Asia/Manila (UTC+8) when they are SHOWN.
+// Nothing stored in the database is changed. The database's offset is detected automatically
+// (so it still works if the server timezone is ever changed); set CASD_DISPLAY_UTC_OFFSET_HOURS to use another zone.
+// (CASD_DISPLAY_UTC_OFFSET_HOURS and CASD_FARMER_APP_UTC_OFFSET_HOURS are defined at the top of this file,
+//  because the message handlers further up use these helpers before this point is reached.)
+function casd_db_utc_offset_seconds($conn) {
+    static $off = null;
+    if ($off === null) {
+        $off = 0;
+        $q = cached_query($conn, "SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()) AS off_s");
+        if ($q && ($r = cached_fetch_assoc($q))) { $off = (int) $r['off_s']; }
+        $off = (int) (round($off / 900) * 900);   // snap to 15 minutes (absorbs the tiny gap between the two clocks)
+    }
+    return $off;
+}
+function casd_ph_time($conn, $str, $srcOffsetSeconds = null) {   // $srcOffsetSeconds: the string's own offset from UTC; null = the database's
+    if ($str === null || $str === '') { return $str; }
+    try {
+        $dt = new DateTime((string) $str, new DateTimeZone('UTC'));
+    } catch (Exception $e) {
+        return $str;   // not a date — leave untouched
+    }
+    $ts = $dt->getTimestamp();
+    // A string with an explicit zone ("...Z", "+08:00") is already an exact moment; a plain
+    // "2026-10-07 04:22:23" is database-local time and must first be taken back to UTC.
+    if (!preg_match('/(Z|[+-]\d{2}:?\d{2})\s*$/i', (string) $str)) { $ts -= ($srcOffsetSeconds === null ? casd_db_utc_offset_seconds($conn) : (int) $srcOffsetSeconds); }
+    return gmdate('Y-m-d H:i:s', $ts + (CASD_DISPLAY_UTC_OFFSET_HOURS * 3600));
+}
+
+>>>>>>> Stashed changes
 // Helper: build the sent-recommendations list for a case row, falling back to the
 // older single recommendation_text column for cases sent before case_messages existed.
 // Also folds in the farmer's reply (disease_cases.farmer_reply_text / farmer_reply_at,
@@ -576,22 +909,38 @@ function buildCaseMessages($conn, $row) {
 }
 
 // 3. STATS CALCULATION
+<<<<<<< Updated upstream
 $stats_query = mysqli_query($conn, "SELECT COUNT(*) as total, 
     COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending, 
     COUNT(CASE WHEN status = 'verified' THEN 1 END) as verified, 
     COUNT(CASE WHEN status = 'resolved' THEN 1 END) as resolved, 
     COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected FROM disease_cases WHERE $manualOnlySql");
 $stats     = mysqli_fetch_assoc($stats_query);
+=======
+// Counts REPORTS, not database rows: a report with 2-3 diseases selected is several disease_cases rows
+// sharing one reference_id, and the list below shows it as ONE file — so the tab numbers count distinct
+// reference_ids (same key the list groups by) or they would be higher than the rows you can see.
+$refKeySql = "COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))";
+$stats_query = cached_query($conn, "SELECT COUNT(DISTINCT $refKeySql) as total,
+    COUNT(DISTINCT CASE WHEN status = 'pending'  THEN $refKeySql END) as pending,
+    COUNT(DISTINCT CASE WHEN status = 'verified' THEN $refKeySql END) as verified,
+    COUNT(DISTINCT CASE WHEN status = 'resolved' THEN $refKeySql END) as resolved,
+    COUNT(DISTINCT CASE WHEN status = 'rejected' THEN $refKeySql END) as rejected FROM disease_cases WHERE $manualOnlySql");
+$stats     = cached_fetch_assoc($stats_query);
+>>>>>>> Stashed changes
 
 // AI scans are counted on their own and never mixed into the report numbers above.
-$scanStats = ['total' => 0, 'week' => 0];
-$ss_q = mysqli_query($conn, "SELECT
+$scanStats = ['total' => 0, 'week' => 0, 'verified' => 0, 'resolved' => 0];
+$ss_q = cached_query($conn, "SELECT
     COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS total,
     COUNT(DISTINCT CASE WHEN report_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-          THEN COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id)) END) AS week
+          THEN COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id)) END) AS week,
+    COUNT(DISTINCT CASE WHEN status = 'verified' THEN COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id)) END) AS verified,
+    COUNT(DISTINCT CASE WHEN status = 'resolved' THEN COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id)) END) AS resolved
     FROM disease_cases WHERE `source` = 'scan'");
-if ($ss_q && $ss_row = mysqli_fetch_assoc($ss_q)) {
-    $scanStats = ['total' => (int)$ss_row['total'], 'week' => (int)$ss_row['week']];
+if ($ss_q && $ss_row = cached_fetch_assoc($ss_q)) {
+    $scanStats = ['total' => (int)$ss_row['total'], 'week' => (int)$ss_row['week'],
+                  'verified' => (int)$ss_row['verified'], 'resolved' => (int)$ss_row['resolved']];
 }
 $activeTab = $_GET['tab'] ?? 'pending';
 
@@ -616,8 +965,8 @@ if ($autoOpenCaseId || $filterBarangayId) { $view = 'disease'; }
 // ...unless that case was AI-scanned: scanned cases live in the AI Scans view, not in Reports.
 // Send the browser there instead (and highlight the row).
 if ($autoOpenCaseId) {
-    $dl_q   = mysqli_query($conn, "SELECT `source` FROM disease_cases WHERE case_id = $autoOpenCaseId LIMIT 1");
-    $dl_row = $dl_q ? mysqli_fetch_assoc($dl_q) : null;
+    $dl_q   = cached_query($conn, "SELECT `source` FROM disease_cases WHERE case_id = $autoOpenCaseId LIMIT 1");
+    $dl_row = $dl_q ? cached_fetch_assoc($dl_q) : null;
     if ($dl_row && $dl_row['source'] === 'scan') {
         $dl_url = 'reports.php?view=scans&scan_id=' . $autoOpenCaseId
                 . ($filterBarangayId ? '&brgy_filter=' . $filterBarangayId : '');
@@ -637,11 +986,11 @@ $filterDateTo   = trim($_GET['date_to']   ?? '');
 $filterBrgyDrop = isset($_GET['brgy_filter']) ? (int)$_GET['brgy_filter'] : 0;
 if ($filterBrgyDrop) { $filterBarangayId = $filterBrgyDrop; }
 
-$allBarangays_q = mysqli_query($conn, "SELECT id, name FROM barangays ORDER BY name ASC");
+$allBarangays_q = cached_query($conn, "SELECT id, name FROM barangays ORDER BY name ASC");
 
 if ($filterBarangayId && !isset($_GET['tab'])) {
-    $tab_q = mysqli_query($conn, "SELECT status FROM disease_cases WHERE $manualOnlySql AND barangay_id=$filterBarangayId ORDER BY FIELD(status,'pending','verified','resolved','rejected') LIMIT 1");
-    if ($tab_q && $row_t = mysqli_fetch_assoc($tab_q)) {
+    $tab_q = cached_query($conn, "SELECT status FROM disease_cases WHERE $manualOnlySql AND barangay_id=$filterBarangayId ORDER BY FIELD(status,'pending','verified','resolved','rejected') LIMIT 1");
+    if ($tab_q && $row_t = cached_fetch_assoc($tab_q)) {
         $activeTab = $row_t['status'];
     }
 }
@@ -651,12 +1000,12 @@ if ($autoOpenCaseId) {
     // Resolve which report (reference_id) this case_id belongs to, then pull EVERY
     // disease row sharing that reference_id — same grouping as the table above —
     // so a multi-disease report reopens as one combined file, not just its first disease.
-    $ao_ref_q   = mysqli_query($conn, "SELECT reference_id FROM disease_cases WHERE case_id = $autoOpenCaseId LIMIT 1");
-    $ao_ref_row = $ao_ref_q ? mysqli_fetch_assoc($ao_ref_q) : null;
+    $ao_ref_q   = cached_query($conn, "SELECT reference_id FROM disease_cases WHERE case_id = $autoOpenCaseId LIMIT 1");
+    $ao_ref_row = $ao_ref_q ? cached_fetch_assoc($ao_ref_q) : null;
 
     if ($ao_ref_row) {
         $ao_ref = mysqli_real_escape_string($conn, $ao_ref_row['reference_id']);
-        $ao_q = mysqli_query($conn, "SELECT dc.*, b.name AS brgy_name, d.disease_name,
+        $ao_q = cached_query($conn, "SELECT dc.*, b.name AS brgy_name, d.disease_name,
             d.description AS disease_description,
             d.recommended_treatment, d.prevention_measures,
             f.profile_farmers AS farmer_photo,
@@ -669,7 +1018,7 @@ if ($autoOpenCaseId) {
             WHERE dc.reference_id = '$ao_ref'
             ORDER BY dc.case_id ASC");
         $ao_rows = [];
-        if ($ao_q) { while ($r = mysqli_fetch_assoc($ao_q)) { $ao_rows[] = $r; } }
+        if ($ao_q) { while ($r = cached_fetch_assoc($ao_q)) { $ao_rows[] = $r; } }
 
         if (!empty($ao_rows)) {
             $ao_primary  = $ao_rows[0]; // ORDER BY case_id ASC → lowest case_id = representative row
@@ -910,6 +1259,13 @@ $tableRows = [];
     /* Visually mark out-of-range dates */
     input[type="date"]:out-of-range { border-color: #fca5a5; background: #fff1f2; }
 
+<<<<<<< Updated upstream
+=======
+    .dr-status-pill { display:none; }
+    #drPanel[data-tab="all"] .dr-status-pill { display:inline-block; }
+    .scan-status-pill { display:none; }
+    #scanPanel[data-tab="all"] .scan-status-pill { display:inline-block; }
+>>>>>>> Stashed changes
     .sev-badge { display:inline-block; font-size:0.58rem; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; padding:2px 8px; border-radius:999px; margin-top:3px; }
     .sev-low      { background:#d1fae5; color:#065f46; }
     .sev-moderate { background:#fef3c7; color:#92400e; }
@@ -970,7 +1326,7 @@ $tableRows = [];
     <div class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 text-[11px] font-black uppercase tracking-wide">
         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/></svg>
         Filtered by Barangay
-        <?php $bn_q = mysqli_query($conn,"SELECT name FROM barangays WHERE id=$filterBarangayId LIMIT 1"); if($bn_q && $bn_r = mysqli_fetch_assoc($bn_q)) echo htmlspecialchars($bn_r['name']); ?>
+        <?php $bn_q = cached_query($conn,"SELECT name FROM barangays WHERE id=$filterBarangayId LIMIT 1"); if($bn_q && $bn_r = cached_fetch_assoc($bn_q)) echo htmlspecialchars($bn_r['name']); ?>
         &nbsp;&mdash;&nbsp;<a href="reports.php" class="underline hover:text-amber-900">Clear filter</a>
     </div>
 </div>
@@ -1021,7 +1377,7 @@ $tableRows = [];
             if ($filterDateFrom)   $tabQueryExtra .= '&date_from=' . urlencode($filterDateFrom);
             if ($filterDateTo)     $tabQueryExtra .= '&date_to='   . urlencode($filterDateTo);
 
-            foreach ($tabConfig as $tab => $cfg): 
+            foreach ($tabConfig as $tab => $cfg):
                 $isActive   = ($activeTab === $tab);
                 $activeClass = $isActive ? 'dr-tab dr-tab-active' : 'dr-tab';
             ?>
@@ -1053,8 +1409,8 @@ $tableRows = [];
                     <option value="0">All Barangays</option>
                     <?php
                     if ($allBarangays_q) {
-                        mysqli_data_seek($allBarangays_q, 0);
-                        while ($b = mysqli_fetch_assoc($allBarangays_q)):
+                        cached_data_seek($allBarangays_q, 0);
+                        while ($b = cached_fetch_assoc($allBarangays_q)):
                     ?>
                         <option value="<?= (int)$b['id'] ?>" <?= ($filterBarangayId == $b['id']) ? 'selected' : '' ?>>
                             <?= htmlspecialchars($b['name']) ?>
@@ -1095,7 +1451,7 @@ $tableRows = [];
         </button>
         <?php endif; ?>
     </div>
-    
+
     <?php
     // ── CALENDAR DATA: one entry per REPORT (a report with several diseases is several rows sharing a
     // reference_id, so it is grouped exactly like the list below), dated by when it was filed.
@@ -1103,10 +1459,10 @@ $tableRows = [];
     // it follows the barangay filter only. Picking a day applies the date filter above.
     $calEvents  = [];
     $calBrgySql = "WHERE $manualOnlySql" . ($filterBarangayId ? " AND barangay_id = " . (int)$filterBarangayId : "");
-    $cal_q = mysqli_query($conn, "SELECT reference_id, DATE(MIN(report_date)) AS d, MIN(status) AS s
+    $cal_q = cached_query($conn, "SELECT reference_id, DATE(MIN(report_date)) AS d, MIN(status) AS s
                                   FROM disease_cases $calBrgySql GROUP BY reference_id");
     if ($cal_q) {
-        while ($c = mysqli_fetch_assoc($cal_q)) {
+        while ($c = cached_fetch_assoc($cal_q)) {
             if (!empty($c['d'])) { $calEvents[] = ['d' => $c['d'], 's' => $c['s'] ?: 'pending']; }
         }
     }
@@ -1141,22 +1497,29 @@ $tableRows = [];
         $safeActiveTab = mysqli_real_escape_string($conn, $activeTab);
         $status_filter = ($activeTab === 'all') ? '' : "AND dc.status = '$safeActiveTab'";
 
-        $query = "SELECT dc.*, 
-                    b.name AS brgy_name, 
+        $query = "SELECT dc.*,
+                    b.name AS brgy_name,
                     d.disease_name,
                     d.description AS disease_description,
                     d.recommended_treatment,
                     d.prevention_measures,
                     f.profile_farmers AS farmer_photo,
                     " . personnel_log_select_sql() . "
-                  FROM disease_cases dc 
-                  LEFT JOIN barangays b ON dc.barangay_id = b.id 
+                  FROM disease_cases dc
+                  LEFT JOIN barangays b ON dc.barangay_id = b.id
                   LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
                   LEFT JOIN farmers f   ON f.farmer_name = SUBSTRING_INDEX(SUBSTRING(dc.description, LOCATE('[FARMER:', dc.description) + 8), ']', 1)
                   " . personnel_log_join_sql() . "
+<<<<<<< Updated upstream
                   WHERE $manualOnlySqlDc $status_filter $brgy_filter $date_filter 
                   ORDER BY dc.report_date DESC, dc.case_id ASC";
         $result = mysqli_query($conn, $query);
+=======
+                  WHERE $manualOnlySqlDc $status_filter $brgy_filter $date_filter
+                  ORDER BY dc.report_date DESC, dc.case_id ASC
+                  LIMIT 2000";   // safety cap: use the barangay / date filters to narrow beyond this
+        $result = cached_query($conn, $query);
+>>>>>>> Stashed changes
 
         // ── GROUP ROWS BY reference_id ──
         // A report with 2-3 diseases selected is stored as several disease_cases
@@ -1165,8 +1528,14 @@ $tableRows = [];
         $groups      = [];  // reference_id => ['primary' => row, 'diseases' => [...], 'case_ids' => [...]]
         $groupOrder  = [];  // preserves first-seen order (already sorted by report_date desc)
         if ($result) {
+<<<<<<< Updated upstream
             while ($row = mysqli_fetch_assoc($result)) {
                 $ref = $row['reference_id'];
+=======
+            while ($row = cached_fetch_assoc($result)) {
+                // Same key as the tab counts above: a row with no reference_id stays its own report.
+                $ref = trim((string)($row['reference_id'] ?? '')) !== '' ? $row['reference_id'] : 'c' . $row['case_id'];
+>>>>>>> Stashed changes
                 if (!isset($groups[$ref])) {
                     $groups[$ref] = ['primary' => $row, 'diseases' => [], 'case_ids' => []];
                     $groupOrder[] = $ref;
@@ -1326,8 +1695,9 @@ $tableRows = [];
 <?php
 // ═══ AI SCANS VIEW ═══
 // Cases the AI image detector classified (disease_cases.source = 'scan').
-// They are a plain log: no Pending -> Verified -> Resolved review, and they are never counted in
-// the Disease Reports tabs or stats. Everything else (source = 'manual_report') is a manual report
+// They are verified automatically by the AI (no CASD review step), so they start as Verified and
+// can be marked Resolved from here. They are kept apart from manual reports: never counted in the
+// Disease Reports tabs or stats. Everything else (source = 'manual_report') is a manual report
 // and shows up under Disease Reports.
 //
 // How a scan row is stored (so this view reads it the same way):
@@ -1349,6 +1719,17 @@ if ($filterDateTo !== '') {
     $scanDateSql .= " AND dc.report_date <= '" . mysqli_real_escape_string($conn, $filterDateTo) . " 23:59:59'";
 }
 $scanHighlightId = isset($_GET['scan_id']) ? (int)$_GET['scan_id'] : 0;   // set by the dashboard deep link
+// Verified / Resolved tabs (normal page load, so the tab lives in the URL). A dashboard deep link to a
+// resolved scan opens the Resolved tab so the highlighted row is actually on screen.
+$scanTab = $_GET['tab'] ?? '';
+if (!in_array($scanTab, ['all', 'verified', 'resolved'], true)) {
+    $scanTab = 'verified';
+    if ($scanHighlightId) {
+        $hl_q = cached_query($conn, "SELECT status FROM disease_cases WHERE case_id = $scanHighlightId AND `source` = 'scan' LIMIT 1");
+        if ($hl_q && ($hl_r = cached_fetch_assoc($hl_q)) && $hl_r['status'] === 'resolved') { $scanTab = 'resolved'; }
+    }
+}
+$scanCounts = ['all' => 0, 'verified' => 0, 'resolved' => 0];
 $scanLimit       = 500;
 $scanHasFilters  = ($filterBarangayId || $filterDateFrom !== '' || $filterDateTo !== '');
 
@@ -1357,8 +1738,8 @@ $scanHasFilters  = ($filterBarangayId || $filterDateFrom !== '' || $filterDateTo
 // falls back to "Farmer #<id>" rather than breaking the page.
 $farmerPk = null;
 $farmerCols = [];
-$fc_q = mysqli_query($conn, "SHOW COLUMNS FROM farmers");
-if ($fc_q) { while ($fc = mysqli_fetch_assoc($fc_q)) { $farmerCols[] = $fc['Field']; } }
+$fc_q = cached_query($conn, "SHOW COLUMNS FROM farmers");
+if ($fc_q) { while ($fc = cached_fetch_assoc($fc_q)) { $farmerCols[] = $fc['Field']; } }
 if (in_array('farmer_name', $farmerCols, true)) {
     foreach (['farmer_id', 'id'] as $cand) {
         if (in_array($cand, $farmerCols, true)) { $farmerPk = $cand; break; }
@@ -1385,19 +1766,25 @@ $scanParse = function ($desc) {
 // file); a scan with an empty reference_id is kept on its own instead of being merged with others.
 $scanGroups = [];
 $scanOrder  = [];
+<<<<<<< Updated upstream
 $scan_q = mysqli_query($conn, "SELECT dc.case_id, dc.reference_id, dc.report_date, dc.description,
             dc.farmer_id, dc.photo_evidence, dc.latitude, dc.longitude, dc.gps_accuracy,
+=======
+$scan_q = cached_query($conn, "SELECT dc.*,
+>>>>>>> Stashed changes
             $scanFarmerSelect
-            b.name AS brgy_name, d.disease_name
+            b.name AS brgy_name, d.disease_name,
+            " . personnel_log_select_sql() . "
         FROM disease_cases dc
         LEFT JOIN barangays b ON dc.barangay_id = b.id
         LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
         $scanFarmerJoin
+        " . personnel_log_join_sql() . "
         WHERE dc.`source` = 'scan' $scanBrgySql $scanDateSql
         ORDER BY dc.report_date DESC, dc.case_id ASC
         LIMIT $scanLimit");
 if ($scan_q) {
-    while ($r = mysqli_fetch_assoc($scan_q)) {
+    while ($r = cached_fetch_assoc($scan_q)) {
         $key = trim((string)($r['reference_id'] ?? '')) !== '' ? (string)$r['reference_id'] : 'case-' . $r['case_id'];
         if (!isset($scanGroups[$key])) {
             $scanGroups[$key] = ['primary' => $r, 'diseases' => [], 'confs' => [], 'confnums' => [], 'case_ids' => []];
@@ -1413,6 +1800,19 @@ if ($scan_q) {
         $scanGroups[$key]['case_ids'][] = (int)$r['case_id'];
     }
 }
+// Tab counts (respect the barangay/date filters). Any leftover 'pending' scan counts as verified.
+foreach ($scanOrder as $__k) {
+    $__st = $scanGroups[$__k]['primary']['status'] === 'resolved' ? 'resolved' : 'verified';
+    $scanCounts[$__st]++;
+    $scanCounts['all']++;
+}
+$scanTabQs = function ($tab) use ($filterBarangayId, $filterDateFrom, $filterDateTo) {
+    $q = ['view' => 'scans', 'tab' => $tab];
+    if ($filterBarangayId)       { $q['brgy_filter'] = $filterBarangayId; }
+    if ($filterDateFrom !== '')  { $q['date_from']   = $filterDateFrom; }
+    if ($filterDateTo !== '')    { $q['date_to']     = $filterDateTo; }
+    return '?' . http_build_query($q);
+};
 ?>
 
 <div class="bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl">
@@ -1421,7 +1821,7 @@ if ($scan_q) {
             <div class="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0 text-2xl">&#128247;</div>
             <div>
                 <h3 class="text-lg font-bold text-gray-900 tracking-tight">AI Scans</h3>
-                <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Photos the AI scanned and classified. Logged automatically, nothing to review here. Everything else is a manual report under Disease Reports.</p>
+                <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Photos the AI scanned and classified. Verified automatically by the AI, so there is nothing to review. Mark a scan as Resolved once it has been dealt with. Manual reports are under Disease Reports.</p>
             </div>
         </div>
         <div class="flex gap-3 shrink-0">
@@ -1432,10 +1832,21 @@ if ($scan_q) {
         </div>
     </div>
 
-    <div id="scanPanel">
+    <div id="scanPanel" data-tab="<?= htmlspecialchars($scanTab) ?>">
+
+    <!-- Tabs: same browser-tab look as Disease Reports. AI scans are never Pending (the AI verifies them). -->
+    <div class="dr-tabs-wrap">
+        <div class="dr-tabs">
+            <?php foreach (['all' => 'All', 'verified' => 'Verified', 'resolved' => 'Resolved'] as $__tk => $__tl): ?>
+                <a href="<?= htmlspecialchars($scanTabQs($__tk)) ?>" class="<?= $scanTab === $__tk ? 'dr-tab dr-tab-active' : 'dr-tab' ?>">
+                    <?= $__tl ?> <span class="dr-tab-count"><?= (int)$scanCounts[$__tk] ?></span>
+                </a>
+            <?php endforeach; ?>
+        </div>
+    </div>
 
     <!-- Search is instant/client-side; barangay + date submit as a normal GET (this view has no AJAX panel). -->
-    <div class="pt-1 flex items-center justify-between flex-wrap gap-4">
+    <div class="pt-5 flex items-center justify-between flex-wrap gap-4">
         <div class="flex items-center gap-2.5 flex-wrap flex-1 min-w-0">
             <div class="relative flex-1 min-w-[180px]">
                 <svg class="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg>
@@ -1446,14 +1857,15 @@ if ($scan_q) {
 
             <form method="get" class="flex items-center gap-2 flex-wrap">
                 <input type="hidden" name="view" value="scans">
+                <input type="hidden" name="tab" value="<?= htmlspecialchars($scanTab) ?>">
 
                 <select name="brgy_filter" onchange="this.form.submit()"
                     class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 uppercase tracking-wide">
                     <option value="0">All Barangays</option>
                     <?php
                     if ($allBarangays_q) {
-                        mysqli_data_seek($allBarangays_q, 0);
-                        while ($b = mysqli_fetch_assoc($allBarangays_q)):
+                        cached_data_seek($allBarangays_q, 0);
+                        while ($b = cached_fetch_assoc($allBarangays_q)):
                     ?>
                         <option value="<?= (int)$b['id'] ?>" <?= ($filterBarangayId == $b['id']) ? 'selected' : '' ?>>
                             <?= htmlspecialchars($b['name']) ?>
@@ -1472,12 +1884,13 @@ if ($scan_q) {
                     Filter
                 </button>
                 <?php if ($scanHasFilters): ?>
-                <a href="?view=scans" class="text-[10px] font-black text-gray-400 hover:text-gray-600 uppercase underline">Clear</a>
+                <a href="?view=scans&tab=<?= htmlspecialchars($scanTab) ?>" class="text-[10px] font-black text-gray-400 hover:text-gray-600 uppercase underline">Clear</a>
                 <?php endif; ?>
             </form>
         </div>
     </div>
 
+<<<<<<< Updated upstream
     <div class="divide-y divide-gray-50 mt-4">
         <?php if (count($scanOrder) > 0):
             foreach ($scanOrder as $__sref):
@@ -1487,6 +1900,18 @@ if ($scan_q) {
                 $sFarmer   = extractFarmerName($srow['description'])
                              ?? (!empty($srow['farmer_name_db']) ? $srow['farmer_name_db']
                              : ((int)($srow['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$srow['farmer_id'] : '— Unassigned —'));
+=======
+    <div id="scanList" class="divide-y divide-gray-50 mt-4">
+        <?php if ($scanCounts[$scanTab] > 0):
+            foreach ($scanOrder as $__sref):
+                $sg        = $scanGroups[$__sref];
+                $srow      = $sg['primary'];
+                $sStatus   = $srow['status'] === 'resolved' ? 'resolved' : 'verified';
+                if ($scanTab !== 'all' && $sStatus !== $scanTab) { continue; }
+                // Farmer: the farmers table (by farmer_id), else "Farmer #id".
+                $sFarmer   = !empty($srow['farmer_name_db']) ? $srow['farmer_name_db']
+                             : ((int)($srow['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$srow['farmer_id'] : '— Unassigned —');
+>>>>>>> Stashed changes
                 $sDiseases = !empty($sg['diseases']) ? implode(' + ', $sg['diseases']) : '—';
                 $sConf     = !empty($sg['confs']) ? $sg['confs'][0] : null;
                 $sConfNum  = !empty($sg['confnums']) ? $sg['confnums'][0] : null;
@@ -1500,6 +1925,13 @@ if ($scan_q) {
                 $sTs       = strtotime($srow['report_date']);
                 $scanModal = [
                     'case_id'        => (int)$srow['case_id'],
+<<<<<<< Updated upstream
+=======
+                    'status'         => $sStatus,
+                    'personnel'      => casd_scan_personnel($srow, $sFarmer),
+                    'resolved_at'    => ($sStatus === 'resolved' && !empty($srow['resolved_at'])) ? date('M d, Y g:i A', strtotime($srow['resolved_at'])) : null,
+                    'unidentified'   => (bool)$sUnidentified,
+>>>>>>> Stashed changes
                     'reference_id'   => (string)($srow['reference_id'] ?? ''),
                     'farmer'         => $sFarmer,
                     'barangay'       => $srow['brgy_name'] ?? '— Unassigned —',
@@ -1517,8 +1949,13 @@ if ($scan_q) {
                     $sFarmer, (string)($srow['reference_id'] ?? ''), $srow['brgy_name'] ?? '', $sDiseases,
                 ]));
         ?>
+<<<<<<< Updated upstream
         <div class="dr-row scan-row" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
              style="border-left:3px solid #10b981;<?= $sIsTarget ? 'background:#ecfdf5;' : '' ?>"
+=======
+        <div class="dr-row scan-row" data-ref="<?= htmlspecialchars(trim((string)($srow['reference_id'] ?? '')) !== '' ? $srow['reference_id'] : 'c' . $srow['case_id']) ?>" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
+             style="border-left:3px solid <?= $sStatus === 'resolved' ? '#059669' : '#2563eb' ?>;<?= $sIsTarget ? 'background:#ecfdf5;' : '' ?>"
+>>>>>>> Stashed changes
              data-search="<?= htmlspecialchars($sSearch) ?>"
              role="button" tabindex="0"
              onclick='openScanModal(<?= htmlspecialchars(json_encode($scanModal), ENT_QUOTES, 'UTF-8') ?>)'
@@ -1549,15 +1986,18 @@ if ($scan_q) {
                 <?php if ($sConf !== null): ?>
                 <span class="sev-badge <?= $sConfClass ?>"><?= htmlspecialchars($sConf) ?> confidence</span>
                 <?php endif; ?>
+                <span class="sev-badge scan-status-pill" style="<?= $sStatus === 'resolved' ? 'background:#d1fae5;color:#065f46' : 'background:#dbeafe;color:#1d4ed8' ?>"><?= $sStatus === 'resolved' ? 'Resolved' : 'Verified' ?></span>
             </div>
         </div>
         <?php endforeach; else: ?>
             <div class="dr-empty">
                 <p class="text-xs font-bold uppercase tracking-widest">
                     <?php if ($scanHasFilters): ?>
-                        No AI scans match these filters.
+                        No <?= htmlspecialchars($scanTab) ?> AI scans match these filters.
+                    <?php elseif ($scanTab === 'resolved'): ?>
+                        No resolved AI scans yet.
                     <?php else: ?>
-                        No AI scans yet. They appear here when a case is saved with source = scan.
+                        No verified AI scans right now. New scans from the app appear here automatically.
                     <?php endif; ?>
                 </p>
             </div>
@@ -1640,6 +2080,35 @@ if ($scan_q) {
                     <p id="scanModalGeo" style="color:#0f172a;font-size:0.8rem;font-weight:700;margin:0;"></p>
                     <a id="scanModalMap" href="#" target="_blank" rel="noopener" style="display:inline-block;margin-top:4px;color:#059669;font-size:0.7rem;font-weight:800;text-decoration:underline;">Open in Maps</a>
                 </div>
+<<<<<<< Updated upstream
+=======
+
+                <div style="border-top:1px solid #f1f5f9;padding-top:12px;">
+                    <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 8px;">Personnel Log</p>
+                    <div id="scanModalLog" style="display:flex;flex-direction:column;gap:8px;"></div>
+                </div>
+
+                <div style="border-top:1px solid #f1f5f9;padding-top:12px;">
+                    <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 6px;">Status</p>
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                        <div style="min-width:0;">
+                            <span id="scanModalStatus" style="display:inline-block;font-size:0.7rem;font-weight:900;padding:4px 12px;border-radius:999px;"></span>
+                            <p id="scanModalStatusNote" style="color:#94a3b8;font-size:10px;font-weight:700;margin:5px 0 0;"></p>
+                        </div>
+                        <div id="scanResolveWrap" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                            <button type="button" id="scanResolveAsk" onclick="scanResolveStep(true)" style="background:#059669;color:#fff;border:0;border-radius:12px;padding:9px 16px;font-size:0.68rem;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;">Mark as Resolved</button>
+                            <form id="scanResolveForm" method="post" style="margin:0;display:none;align-items:center;gap:8px;flex-wrap:wrap;">
+                                <input type="hidden" name="resolve_scan" value="1">
+                                <input type="hidden" name="case_id" id="scanResolveCaseId" value="">
+                                <span style="color:#475569;font-size:0.72rem;font-weight:800;">Resolve this scan?</span>
+                                <button type="button" onclick="scanResolveStep(false)" style="background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;border-radius:12px;padding:8px 14px;font-size:0.68rem;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;">Cancel</button>
+                                <button type="submit" style="background:#059669;color:#fff;border:0;border-radius:12px;padding:9px 16px;font-size:0.68rem;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;">Yes, resolve</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+>>>>>>> Stashed changes
             </div>
         </div>
     </div>
@@ -1704,6 +2173,38 @@ function openScanModal(d) {
         img.removeAttribute('src'); showNoPhoto();
     }
 
+    // Status: scans are verified by the AI; the only action left is Resolve.
+    var stEl = document.getElementById('scanModalStatus'), stNote = document.getElementById('scanModalStatusNote'), resolveWrap = document.getElementById('scanResolveWrap');
+    scanResolveStep(false);
+    if (d.status === 'resolved') {
+        stEl.textContent = 'Resolved'; stEl.style.background = '#d1fae5'; stEl.style.color = '#065f46';
+        stNote.textContent = d.resolved_at ? 'Resolved on ' + d.resolved_at : '';
+        resolveWrap.style.display = 'none';
+    } else {
+        stEl.textContent = 'Verified by AI'; stEl.style.background = '#dbeafe'; stEl.style.color = '#1d4ed8';
+        stNote.textContent = 'No CASD review needed';
+        resolveWrap.style.display = 'flex';
+        document.getElementById('scanResolveCaseId').value = d.case_id;
+    }
+
+    // Personnel log: who scanned, who verified (the AI), who resolved
+    var logEl = document.getElementById('scanModalLog');
+    logEl.innerHTML = '';
+    (d.personnel || []).forEach(function (p) {
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;gap:12px;';
+        var left = document.createElement('div'); left.style.minWidth = '0';
+        var lab = document.createElement('p'); lab.textContent = p.label;
+        lab.style.cssText = 'color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.12em;text-transform:uppercase;margin:0;';
+        var nm = document.createElement('p'); nm.textContent = p.name || '—';
+        nm.style.cssText = 'color:#0f172a;font-size:0.8rem;font-weight:700;margin:0;word-break:break-word;';
+        left.appendChild(lab); left.appendChild(nm);
+        var at = document.createElement('span'); at.textContent = p.at || '';
+        at.style.cssText = 'color:#94a3b8;font-size:0.68rem;font-weight:700;white-space:nowrap;';
+        row.appendChild(left); row.appendChild(at);
+        logEl.appendChild(row);
+    });
+
     // Location (only when the scan has coordinates)
     var geoWrap = document.getElementById('scanModalGeoWrap');
     if (d.lat !== null && d.lat !== undefined && d.lng !== null && d.lng !== undefined) {
@@ -1720,6 +2221,14 @@ function openScanModal(d) {
     document.body.style.overflow = 'hidden';
     var closeBtn = document.getElementById('scanModalClose');
     if (closeBtn) closeBtn.focus();
+}
+
+// Resolve button -> inline "Resolve this scan? Cancel / Yes, resolve" (no browser confirm box)
+function scanResolveStep(confirming) {
+    var ask = document.getElementById('scanResolveAsk'), form = document.getElementById('scanResolveForm');
+    if (!ask || !form) return;
+    ask.style.display  = confirming ? 'none' : '';
+    form.style.display = confirming ? 'flex' : 'none';
 }
 
 function closeScanModal() {
@@ -1749,9 +2258,9 @@ window.addEventListener('DOMContentLoaded', function () {
 
 <?php
 $allDiseasesForPicker = [];
-$diseases_q = mysqli_query($conn, "SELECT disease_id, disease_name, description AS disease_description FROM diseases WHERE disease_id != 999 ORDER BY disease_name ASC");
+$diseases_q = cached_query($conn, "SELECT disease_id, disease_name, description AS disease_description FROM diseases WHERE disease_id != 999 ORDER BY disease_name ASC");
 if ($diseases_q) {
-    while ($d = mysqli_fetch_assoc($diseases_q)) {
+    while ($d = cached_fetch_assoc($diseases_q)) {
         $allDiseasesForPicker[] = [
             'disease_id'          => (int)$d['disease_id'],
             'disease_name'        => $d['disease_name'],

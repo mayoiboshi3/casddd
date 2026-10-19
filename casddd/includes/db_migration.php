@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/../includes/data_cache.php';
+
 /**
  * db_migration.php
  * -------------------------------------------------------------------------
@@ -22,24 +24,24 @@
 // ── Helper: does a table exist? ──
 function tableExists($conn, $tableName) {
     $safe = mysqli_real_escape_string($conn, $tableName);
-    $res  = mysqli_query($conn, "SHOW TABLES LIKE '$safe'");
-    return $res && mysqli_num_rows($res) > 0;
+    $res  = cached_query($conn, "SHOW TABLES LIKE '$safe'");
+    return $res && cached_num_rows($res) > 0;
 }
 
 // ── Helper: does a table already have a PRIMARY KEY? ──
 function hasPrimaryKey($conn, $tableName) {
     $safe = mysqli_real_escape_string($conn, $tableName);
-    $res  = mysqli_query($conn, "SHOW KEYS FROM `$safe` WHERE Key_name = 'PRIMARY'");
-    return $res && mysqli_num_rows($res) > 0;
+    $res  = cached_query($conn, "SHOW KEYS FROM `$safe` WHERE Key_name = 'PRIMARY'");
+    return $res && cached_num_rows($res) > 0;
 }
 
 // ── 1. Ensure `diseases` has a PRIMARY KEY on disease_id ──
 if (!hasPrimaryKey($conn, 'diseases')) {
 
     // Guard: a PRIMARY KEY can't be added if disease_id has duplicate values.
-    $dupCheck = mysqli_query($conn, "SELECT disease_id FROM diseases GROUP BY disease_id HAVING COUNT(*) > 1 LIMIT 1");
+    $dupCheck = cached_query($conn, "SELECT disease_id FROM diseases GROUP BY disease_id HAVING COUNT(*) > 1 LIMIT 1");
 
-    if ($dupCheck && mysqli_num_rows($dupCheck) > 0) {
+    if ($dupCheck && cached_num_rows($dupCheck) > 0) {
         // Can't safely auto-fix duplicates — stop with a clear message
         // instead of letting every later query fail mysteriously.
         die("Setup error: the 'diseases' table has duplicate disease_id values, "
@@ -47,7 +49,7 @@ if (!hasPrimaryKey($conn, 'diseases')) {
           . "duplicates manually, then reload this page.");
     }
 
-    if (!mysqli_query($conn, "ALTER TABLE `diseases` ADD PRIMARY KEY (`disease_id`)")) {
+    if (!cached_query($conn, "ALTER TABLE `diseases` ADD PRIMARY KEY (`disease_id`)")) {
         die("Setup error: failed to add PRIMARY KEY to 'diseases' table — " . mysqli_error($conn));
     }
 }
@@ -55,7 +57,7 @@ if (!hasPrimaryKey($conn, 'diseases')) {
 // ── 2. Ensure `disease_case_diseases` exists ──
 if (!tableExists($conn, 'disease_case_diseases')) {
 
-    $ok = mysqli_query($conn, "
+    $ok = cached_query($conn, "
         CREATE TABLE `disease_case_diseases` (
             `id` int(11) NOT NULL AUTO_INCREMENT,
             `case_id` int(11) NOT NULL,
@@ -73,7 +75,7 @@ if (!tableExists($conn, 'disease_case_diseases')) {
     }
 
     // Backfill existing single-disease cases (only runs the moment the table is first created)
-    mysqli_query($conn, "
+    cached_query($conn, "
         INSERT INTO disease_case_diseases (case_id, disease_id)
         SELECT case_id, disease_id FROM disease_cases WHERE disease_id IS NOT NULL
     ");
@@ -82,7 +84,7 @@ if (!tableExists($conn, 'disease_case_diseases')) {
 // ── 3. Ensure `disease_case_photos` exists ──
 if (!tableExists($conn, 'disease_case_photos')) {
 
-    $ok = mysqli_query($conn, "
+    $ok = cached_query($conn, "
         CREATE TABLE `disease_case_photos` (
             `id` int(11) NOT NULL AUTO_INCREMENT,
             `case_id` int(11) NOT NULL,
@@ -99,7 +101,7 @@ if (!tableExists($conn, 'disease_case_photos')) {
     }
 
     // Backfill existing single-photo cases (only runs the moment the table is first created)
-    mysqli_query($conn, "
+    cached_query($conn, "
         INSERT INTO disease_case_photos (case_id, filename)
         SELECT case_id, photo_evidence FROM disease_cases
         WHERE photo_evidence IS NOT NULL AND photo_evidence <> ''

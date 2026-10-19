@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/includes/data_cache.php';
+
 /**
  * get_farmer_reports.php
  * AJAX endpoint — returns all disease_cases for a given farmer as JSON.
@@ -13,6 +15,7 @@ header('Content-Type: application/json');
 /* ── Validate input ──────────────────────────────── */
 $farmerName = trim($_GET['farmer_name'] ?? '');
 
+<<<<<<< Updated upstream
 if ($farmerName === '') {
     echo json_encode(['success' => false, 'message' => 'Farmer name is required.']);
     exit;
@@ -20,6 +23,25 @@ if ($farmerName === '') {
 
 /* ── Query disease_cases by [FARMER:name] marker in description ── */
 $stmt = $conn->prepare("
+=======
+// Only a name was sent (older callers): look the farmer up to get the id.
+if ($farmerId <= 0 && $farmerName !== '') {
+    $lk = cached_prepare($conn, "SELECT farmer_id FROM farmers WHERE farmer_name = ? LIMIT 1");
+    cached_bind_param($lk, 's', $farmerName);
+    cached_execute($lk);
+    $lkRow = cached_get_result($lk)->fetch_assoc();
+    $lk->close();
+    if ($lkRow) { $farmerId = (int)$lkRow['farmer_id']; }
+}
+
+if ($farmerId <= 0 && $farmerName === '') {
+    echo json_encode(['success' => false, 'message' => 'Farmer is required.']);
+    exit;
+}
+
+/* ── Query disease_cases by farmer_id (plus old [FARMER:name] rows as a fallback) ── */
+$stmt = cached_prepare($conn, "
+>>>>>>> Stashed changes
     SELECT
         dc.case_id,
         dc.reference_id,
@@ -46,11 +68,22 @@ $stmt = $conn->prepare("
     ORDER BY dc.report_date DESC
 ");
 
+<<<<<<< Updated upstream
 // Match the [FARMER:name] prefix stored at the start of description
 $pattern = '[FARMER:' . $farmerName . ']%';
 $stmt->bind_param('s', $pattern);
 $stmt->execute();
 $result = $stmt->get_result();
+=======
+// Old-style rows stored "[FARMER:name]" at the start of description. Escape LIKE wildcards in the name.
+// If there is no name, use a pattern that cannot match anything.
+$pattern = $farmerName !== ''
+    ? '[FARMER:' . addcslashes($farmerName, '%_\\') . ']%'
+    : '[FARMER:]__no_match__';
+cached_bind_param($stmt, 'is', $farmerId, $pattern);
+cached_execute($stmt);
+$result = cached_get_result($stmt);
+>>>>>>> Stashed changes
 
 $reports = [];
 while ($row = $result->fetch_assoc()) {
@@ -65,9 +98,9 @@ $stmt->close();
 function fetchCaseMessages($conn, $case_id) {
     $messages = [];
     $case_id  = (int)$case_id;
-    $q = mysqli_query($conn, "SELECT sender, message_text, created_at FROM case_messages WHERE case_id = $case_id ORDER BY created_at ASC, message_id ASC");
+    $q = cached_query($conn, "SELECT sender, message_text, created_at FROM case_messages WHERE case_id = $case_id ORDER BY created_at ASC, message_id ASC");
     if ($q) {
-        while ($r = mysqli_fetch_assoc($q)) {
+        while ($r = cached_fetch_assoc($q)) {
             $messages[] = [
                 'sender'     => $r['sender'],
                 'message'    => $r['message_text'],

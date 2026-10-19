@@ -1,4 +1,6 @@
-<?php 
+<?php
+require_once __DIR__ . '/includes/data_cache.php';
+
 /**
  * analytics.php requires login. The guard runs first, before the API
  * branch below — previously the API (?api=1) ran and exited before
@@ -16,7 +18,7 @@ if (isset($_GET['api'])) {
     header('Content-Type: application/json');
 
     function q($conn, $sql) {
-        $r = $conn->query($sql);
+        $r = cached_query($conn, $sql);
         return $r ? $r->fetch_all(MYSQLI_ASSOC) : [];
     }
 
@@ -64,10 +66,10 @@ if (isset($_GET['api'])) {
         ];
 
         $sql = $baseSql . " " . $whereMap[$type] . " ORDER BY dc.report_date DESC LIMIT 50";
-        $stmt = $conn->prepare($sql);
-        $stmt->bind_param('s', $value);
-        $stmt->execute();
-        $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $stmt = cached_prepare($conn, $sql);
+        cached_bind_param($stmt, 's', $value);
+        cached_execute($stmt);
+        $rows = cached_get_result($stmt)->fetch_all(MYSQLI_ASSOC);
 
         echo json_encode(['type' => $type, 'value' => $value, 'cases' => $rows]);
         exit;
@@ -85,16 +87,16 @@ if (isset($_GET['api'])) {
 
     // 2. Hotspot Analysis (Top 5 Barangay)
     $hotspots = q($conn, "
-        SELECT b.name as brgy, COUNT(dc.case_id) as count 
-        FROM disease_cases dc 
-        JOIN barangays b ON dc.barangay_id = b.id 
+        SELECT b.name as brgy, COUNT(dc.case_id) as count
+        FROM disease_cases dc
+        JOIN barangays b ON dc.barangay_id = b.id
         GROUP BY brgy ORDER BY count DESC LIMIT 5
     ");
 
     // 3. Growth Stage Vulnerability
     $stageVulnerability = q($conn, "
-        SELECT growth_stage, COUNT(*) as count 
-        FROM disease_cases 
+        SELECT growth_stage, COUNT(*) as count
+        FROM disease_cases
         GROUP BY growth_stage ORDER BY count DESC
     ");
 
@@ -102,9 +104,9 @@ if (isset($_GET['api'])) {
     // NOTE: switched to LEFT JOIN so cases with a null disease_id still show up
     // (an inner JOIN here was silently dropping them from the feed).
     $recentLogs = q($conn, "
-        SELECT dc.reference_id, IFNULL(d.disease_name,'Unknown') disease_name, dc.report_date 
-        FROM disease_cases dc 
-        LEFT JOIN diseases d ON dc.disease_id = d.disease_id 
+        SELECT dc.reference_id, IFNULL(d.disease_name,'Unknown') disease_name, dc.report_date
+        FROM disease_cases dc
+        LEFT JOIN diseases d ON dc.disease_id = d.disease_id
         ORDER BY dc.report_date DESC LIMIT 5
     ");
 
@@ -196,7 +198,7 @@ include "includes/layout.php";
     </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        
+
         <div class="bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl">
             <h3 class="text-sm font-black text-gray-800 uppercase tracking-widest mb-5">Sector Hotspots</h3>
             <div id="hotspot-list" class="space-y-4">
@@ -396,8 +398,8 @@ function buildStatus(statusData){
                 hoverOffset: 15
             }]
         },
-        options: { 
-            responsive: true, 
+        options: {
+            responsive: true,
             maintainAspectRatio: false,
             cutout: '75%',
             plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, padding: 20 } } },
@@ -428,8 +430,8 @@ function buildStageChart(vuln) {
                 borderWidth: 0
             }]
         },
-        options: { 
-            responsive: true, 
+        options: {
+            responsive: true,
             maintainAspectRatio: false,
             scales: { r: { ticks: { display: false }, grid: { color: '#f1f5f9' } } },
             plugins: { legend: { display: false } },
@@ -456,12 +458,12 @@ function buildDisease(freq){
                 barThickness: 50
             }]
         },
-        options: { 
-            responsive: true, 
+        options: {
+            responsive: true,
             maintainAspectRatio: false,
-            scales: { 
-                y: { beginAtZero: true, grid: { color: '#f8fafc' } }, 
-                x: { grid: { display: false } } 
+            scales: {
+                y: { beginAtZero: true, grid: { color: '#f8fafc' } },
+                x: { grid: { display: false } }
             },
             plugins: { legend: { display: false } },
             onClick: (evt, elements) => {

@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/includes/data_cache.php';
+
 /**
  * accounts.php — Account Manager. ADMIN ONLY.
  *
@@ -52,10 +54,10 @@ if (isset($_GET['api'])) {
             echo json_encode(['ok' => false, 'msg' => 'Please enter your password to confirm this change.']);
             return false;
         }
-        $stmt = $conn->prepare("SELECT password FROM users WHERE user_id = ? LIMIT 1");
-        $stmt->bind_param("i", $currentAdminId);
-        $stmt->execute();
-        $res = $stmt->get_result();
+        $stmt = cached_prepare($conn, "SELECT password FROM users WHERE user_id = ? LIMIT 1");
+        cached_bind_param($stmt, "i", $currentAdminId);
+        cached_execute($stmt);
+        $res = cached_get_result($stmt);
         $row = $res->fetch_assoc();
         $stmt->close();
 
@@ -69,7 +71,7 @@ if (isset($_GET['api'])) {
     // --- LIST USERS ---
     if ($_GET['api'] === 'list') {
         $rows = [];
-        $res = $conn->query("SELECT user_id, username, full_name, email, role, profile_photo, phone_number, status, created_at FROM users WHERE user_id != $currentAdminId ORDER BY role ASC, full_name ASC");
+        $res = cached_query($conn, "SELECT user_id, username, full_name, email, role, profile_photo, phone_number, status, created_at FROM users WHERE user_id != $currentAdminId ORDER BY role ASC, full_name ASC");
         while ($r = $res->fetch_assoc()) { $rows[] = $r; }
         echo json_encode(['users' => $rows]);
         exit;
@@ -107,7 +109,7 @@ if (isset($_GET['api'])) {
         }
 
         $sql = "UPDATE users SET " . implode(', ', $setParts) . " WHERE user_id=$id";
-        $ok  = $conn->query($sql);
+        $ok  = cached_query($conn, $sql);
         echo json_encode(['ok' => (bool)$ok, 'msg' => $ok ? 'Account updated successfully.' : $conn->error]);
         exit;
     }
@@ -121,7 +123,7 @@ if (isset($_GET['api'])) {
 
         if (!verifyAdminPassword($conn, $currentAdminId, $body['admin_password'] ?? '')) { exit; }
 
-        $ok = $conn->query("DELETE FROM users WHERE user_id=$id");
+        $ok = cached_query($conn, "DELETE FROM users WHERE user_id=$id");
         echo json_encode(['ok' => (bool)$ok, 'msg' => $ok ? 'User deleted.' : $conn->error]);
         exit;
     }
@@ -142,7 +144,7 @@ if (isset($_GET['api'])) {
             echo json_encode(['ok' => false, 'msg' => 'All required fields must be filled.']); exit;
         }
         $hashed = $conn->real_escape_string(password_hash($pwd, PASSWORD_BCRYPT));
-        $ok = $conn->query("INSERT INTO users (username, password, full_name, email, phone_number, role, status) VALUES ('$username','$hashed','$fullname','$email'," . ($phone ? "'$phone'" : "NULL") . ",'$role','active')");
+        $ok = cached_query($conn, "INSERT INTO users (username, password, full_name, email, phone_number, role, status) VALUES ('$username','$hashed','$fullname','$email'," . ($phone ? "'$phone'" : "NULL") . ",'$role','active')");
         echo json_encode(['ok' => (bool)$ok, 'msg' => $ok ? 'Account created successfully.' : $conn->error]);
         exit;
     }

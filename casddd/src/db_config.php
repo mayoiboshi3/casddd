@@ -1,8 +1,17 @@
 <?php
+<<<<<<< Updated upstream
 $host     = "localhost";
 $dbname   = "u250976479_corncasd_db";
 $username = "u250976479_Corn_Admin";
 $password = "CornCasd_26";
+=======
+require_once __DIR__ . '/../includes/data_cache.php';
+
+$servername = "localhost";
+$username = "root";
+$password = "";
+$dbname = "db2"; // Based on your file list
+>>>>>>> Stashed changes
 
 $conn = mysqli_connect($host, $username, $password, $dbname);
 

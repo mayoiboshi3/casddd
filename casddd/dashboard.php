@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/includes/data_cache.php';
+
 $pageTitle = "Dashboard / Map";
 include "includes/layout.php";
 
@@ -8,34 +10,57 @@ if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
 
+<<<<<<< Updated upstream
 $conn->set_charset('utf8mb4'); // so names like "Bañadero" come through intact
+=======
+if (isset($conn) && $conn) {
+    cached_query($conn, "UPDATE disease_cases dc
+                         INNER JOIN farmers f ON f.farmer_id = dc.farmer_id
+                         SET dc.barangay_id = f.barangay_id,
+                             dc.updated_at  = dc.updated_at
+                         WHERE dc.barangay_id IS NULL
+                           AND f.barangay_id IS NOT NULL");
+}
+>>>>>>> Stashed changes
 
 // ── STAT: Total Farmers ──
 $totalFarmers = 0;
-$f = $conn->query("SELECT COUNT(*) AS cnt FROM farmers WHERE status = 'active'");
+$f = cached_query($conn, "SELECT COUNT(*) AS cnt FROM farmers WHERE status = 'active'");
 if ($f) { $totalFarmers = $f->fetch_assoc()['cnt']; }
 
 
 // ── STAT: Active Reports (pending + verified) — manual reports only; AI scans
 // don't need review, so they're excluded here and counted separately below. ──
 $totalActiveReports = 0;
+<<<<<<< Updated upstream
 $r = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
+=======
+$r = cached_query($conn, "SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status IN ('pending','verified') AND `source` = 'manual_report'");
+>>>>>>> Stashed changes
 if ($r) { $totalActiveReports = $r->fetch_assoc()['cnt']; }
 
 // ── STAT: Verified Cases (manual reports only) ──
 $totalVerifiedCases = 0;
+<<<<<<< Updated upstream
 $v = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
+=======
+$v = cached_query($conn, "SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status = 'verified' AND `source` = 'manual_report'");
+>>>>>>> Stashed changes
 if ($v) { $totalVerifiedCases = $v->fetch_assoc()['cnt']; }
 
 // ── STAT: AI Scans — auto-classified cases that don't require review ──
 $totalAiScans = 0;
+<<<<<<< Updated upstream
 $as = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
+=======
+$as = cached_query($conn, "SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE `source` = 'scan' AND status IN ('pending','verified','resolved')");
+>>>>>>> Stashed changes
 if ($as) { $totalAiScans = $as->fetch_assoc()['cnt']; }
 
 // ── BUILD BARANGAY DATA ──
 $barangayData = [];
 
-$brgy_res = $conn->query("SELECT id, name FROM barangays ORDER BY name");
+$brgy_res = cached_query($conn, "SELECT id, name FROM barangays ORDER BY name");
 if ($brgy_res) {
     while ($row = $brgy_res->fetch_assoc()) {
         $brgy_id   = (int)$row['id'];
@@ -44,7 +69,7 @@ if ($brgy_res) {
         // Single query for both the counts and the case list — AI-scanned cases
         // (source = 'scan') don't need review, so they're tallied separately as
         // ai_scan_count instead of being folded into pending/verified/resolved.
-        $cases_res = $conn->query("
+        $cases_res = cached_query($conn, "
             SELECT dc.case_id, dc.reference_id, dc.status, dc.report_date,
                    dc.severity, dc.plants_affected, dc.total_plants,
                    dc.infection_percentage, dc.description, dc.photo_evidence,
@@ -130,7 +155,11 @@ if ($brgy_res) {
 
 // ── STAT: Pending Cases (manual reports only — AI scans never need review) ──
 $totalPendingCases = 0;
+<<<<<<< Updated upstream
 $pq = $conn->query("SELECT COUNT(*) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
+=======
+$pq = cached_query($conn, "SELECT COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS cnt FROM disease_cases WHERE status = 'pending' AND `source` = 'manual_report'");
+>>>>>>> Stashed changes
 if ($pq) { $totalPendingCases = $pq->fetch_assoc()['cnt']; }
 
 $conn->close();
@@ -1041,10 +1070,13 @@ function buildBrgyReportCard(c) {
 
     // Status badge — just the current status, not the full history (e.g. a resolved
     // case shows only "Resolved", not "Verified" + "Resolved").
-    // AI-scanned cases skip the review-pipeline badges entirely since they never need review.
+    // AI-scanned cases skip the "Waiting for Review" step: they show AI Scanned + Verified/Resolved.
     const badgeDefs = [];
     if (isAiScan) {
+        // AI scans are verified by the AI itself (no CASD review); they only move on to Resolved.
         badgeDefs.push({ text: 'AI Scanned', color: '#8b5cf6', bg: 'rgba(139,92,246,0.1)' });
+        if (isResolved) badgeDefs.push({ text: 'Resolved', color: '#16a34a', bg: 'rgba(22,163,74,0.1)' });
+        else            badgeDefs.push({ text: 'Verified', color: '#3b82f6', bg: 'rgba(59,130,246,0.1)' });
     } else {
         if (isPending)       badgeDefs.push({ text: 'Waiting for Review', color: '#f97316', bg: 'rgba(249,115,22,0.1)' });
         else if (isResolved) badgeDefs.push({ text: 'Resolved', color: '#16a34a', bg: 'rgba(22,163,74,0.1)' });

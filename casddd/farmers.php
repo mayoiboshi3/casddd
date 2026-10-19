@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/includes/data_cache.php';
+
 // Same duplicate-folder situation as process_farmer.php: this project has
 // files sitting in both C:\xampp\htdocs\casddd\ and C:\xampp\htdocs\casddd\src\,
 // so check a couple of likely spots instead of assuming one fixed path.
@@ -9,12 +11,12 @@ unset($__dbConfigPath);
 $pageTitle = "Farmer Records";
 include "includes/layout.php";
 
-$barangay_list = mysqli_query($conn, "SELECT id, name FROM barangays ORDER BY name ASC");
+$barangay_list = cached_query($conn, "SELECT id, name FROM barangays ORDER BY name ASC");
 $barangays = [];
-while ($b = mysqli_fetch_assoc($barangay_list)) { $barangays[] = $b; }
+while ($b = cached_fetch_assoc($barangay_list)) { $barangays[] = $b; }
 
-$stats_q = mysqli_query($conn, "SELECT COUNT(*) as total FROM farmers");
-$stats   = mysqli_fetch_assoc($stats_q);
+$stats_q = cached_query($conn, "SELECT COUNT(*) as total FROM farmers");
+$stats   = cached_fetch_assoc($stats_q);
 
 $success = htmlspecialchars($_GET['success'] ?? '');
 $errMsg  = htmlspecialchars($_GET['error']   ?? '');
@@ -243,12 +245,12 @@ window.addEventListener('DOMContentLoaded',()=>{
             </thead>
             <tbody id="farmerTableBody">
             <?php
-            $result = mysqli_query($conn,
-                "SELECT f.*, b.name AS bname FROM farmers f
+            $result = cached_query($conn,
+                "SELECT f.farmer_id, f.farmer_name, f.contact_number, f.age, f.gender, f.years_farming, f.created_at, f.barangay_id, f.email, f.status, f.profile_farmers, b.name AS bname FROM farmers f
                  LEFT JOIN barangays b ON f.barangay_id = b.id
                  ORDER BY f.created_at DESC");
             $rowNum = 0;
-            while ($row = mysqli_fetch_assoc($result)):
+            while ($row = cached_fetch_assoc($result)):
                 $rowNum++;
                 $img    = !empty($row['profile_farmers']) ? 'uploads/' . $row['profile_farmers'] : 'assets/default-user.png';
                 $gender = $row['gender'] ?? '';

@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/includes/data_cache.php';
+
 // ════════════════════════════════════════════════════════════════════════
 // PLANTING & HARVESTING REPORTS
 // Shows the planting/harvesting reports farmers submit (planting_harvesting_reports
@@ -200,7 +202,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['add_ph_report'])) {
                  $area_hectares, $photo_db_value, 1, '$status', '$remarks', $createdBySql, NOW(), NULL, NOW())";
         }
 
-        if (mysqli_query($conn, $insertQuery)) {
+        if (cached_query($conn, $insertQuery)) {
             $new_report_id = mysqli_insert_id($conn);
             // Redirect back with the new report's id so the section can show a
             // "View Report" button for it (instead of just an alert).
@@ -254,8 +256,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_ph_report'])) {
     } else {
         // Re-read the CURRENT status fresh from the DB right now -- never trust
         // whatever status the modal happened to be showing when it was opened.
-        $cur_q   = mysqli_query($conn, "SELECT status FROM planting_harvesting_reports WHERE report_id = $ph_report_id LIMIT 1");
-        $cur_row = $cur_q ? mysqli_fetch_assoc($cur_q) : null;
+        $cur_q   = cached_query($conn, "SELECT status FROM planting_harvesting_reports WHERE report_id = $ph_report_id LIMIT 1");
+        $cur_row = $cur_q ? cached_fetch_assoc($cur_q) : null;
 
         if (!$cur_row) {
             $result['gone']    = true;
@@ -277,7 +279,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_ph_report'])) {
                 if ($remarks_raw === '') {
                     $result['message'] = 'Please enter the reason for rejecting this report.';
                 } else {
-                    $rej_ok = mysqli_query($conn, "UPDATE planting_harvesting_reports
+                    $rej_ok = cached_query($conn, "UPDATE planting_harvesting_reports
                         SET status = 'rejected', remarks = '$remarks', rejected_by = $actorSql, rejected_at = NOW(), updated_at = NOW()
                         WHERE report_id = $ph_report_id AND $stillPending");
                     if ($rej_ok && mysqli_affected_rows($conn) > 0) {
@@ -295,7 +297,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_ph_report'])) {
                 $setSql   = $isVerify
                     ? "status = 'verified', remarks = '$remarks', verified_by = $actorSql, verified_at = NOW(), updated_at = NOW()"
                     : "remarks = '$remarks', updated_at = NOW()";
-                $upd_ok = mysqli_query($conn, "UPDATE planting_harvesting_reports SET $setSql WHERE report_id = $ph_report_id AND $stillPending");
+                $upd_ok = cached_query($conn, "UPDATE planting_harvesting_reports SET $setSql WHERE report_id = $ph_report_id AND $stillPending");
                 if ($upd_ok && (!$isVerify || mysqli_affected_rows($conn) > 0)) {
                     $result = ['success' => true, 'gone' => false, 'report_id' => $ph_report_id,
                                'new_status' => $isVerify ? 'verified' : 'pending', 'remarks' => $remarks_raw,
@@ -371,8 +373,8 @@ function ph_report_payload($r) {
     ];
 }
 function ph_fetch_report_payload($conn, $report_id) {
-    $q   = mysqli_query($conn, ph_report_select_sql() . " WHERE phr.report_id = " . (int)$report_id . " LIMIT 1");
-    $row = $q ? mysqli_fetch_assoc($q) : null;
+    $q   = cached_query($conn, ph_report_select_sql() . " WHERE phr.report_id = " . (int)$report_id . " LIMIT 1");
+    $row = $q ? cached_fetch_assoc($q) : null;
     return $row ? ph_report_payload($row) : null;
 }
 
@@ -428,12 +430,12 @@ function render_planting_harvesting_section($conn) {
     global $PH_STATUS_FLOW;
 
     // Stats — an empty-string (or legacy "received") status in the DB counts as "pending".
-    $ph_stats_q = mysqli_query($conn, "SELECT COUNT(*) AS total,
+    $ph_stats_q = cached_query($conn, "SELECT COUNT(*) AS total,
         COUNT(CASE WHEN status = 'received' OR status = '' OR status IS NULL THEN 1 END) AS pending,
         COUNT(CASE WHEN status = 'verified' THEN 1 END) AS verified,
         COUNT(CASE WHEN status = 'rejected' THEN 1 END) AS rejected
         FROM planting_harvesting_reports");
-    $ph_stats = mysqli_fetch_assoc($ph_stats_q) ?: ['total' => 0, 'pending' => 0, 'verified' => 0, 'rejected' => 0];
+    $ph_stats = cached_fetch_assoc($ph_stats_q) ?: ['total' => 0, 'pending' => 0, 'verified' => 0, 'rejected' => 0];
 
     // If we just redirected back from "+ Add Report", pull that one report's
     // full data so we can show a "View Report" button for it right away.
@@ -441,18 +443,18 @@ function render_planting_harvesting_section($conn) {
 
     // Farmers, for the "+ Add Report" farmer picker
     $ph_farmers = [];
-    $ph_farmers_q = mysqli_query($conn, "SELECT f.farmer_id, f.farmer_name, b.name AS brgy_name
+    $ph_farmers_q = cached_query($conn, "SELECT f.farmer_id, f.farmer_name, b.name AS brgy_name
                                           FROM farmers f LEFT JOIN barangays b ON f.barangay_id = b.id
                                           ORDER BY f.farmer_name ASC");
-    if ($ph_farmers_q) { while ($f = mysqli_fetch_assoc($ph_farmers_q)) { $ph_farmers[] = $f; } }
+    if ($ph_farmers_q) { while ($f = cached_fetch_assoc($ph_farmers_q)) { $ph_farmers[] = $f; } }
 
     // Full list of every report — INCLUDING rejected ones, which are kept now (with the
     // reviewer's reason in `remarks`) and shown under the Rejected filter.
     $ph_all_rows = [];
-    $ph_all_q = mysqli_query($conn, ph_report_select_sql() . "
+    $ph_all_q = cached_query($conn, ph_report_select_sql() . "
                  ORDER BY phr.submitted_at DESC, phr.report_id DESC");
     if ($ph_all_q) {
-        while ($ar = mysqli_fetch_assoc($ph_all_q)) {
+        while ($ar = cached_fetch_assoc($ph_all_q)) {
             $ph_all_rows[] = ph_report_payload($ar);
         }
     }

@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/includes/data_cache.php';
+
 /**
  * PERSONNEL LOG
  * ----------------------------------------------------------------------
@@ -52,8 +54,8 @@ function personnel_log_current_user_id($conn) {
     }
     if (!empty($_SESSION['username'])) {
         $uname = mysqli_real_escape_string($conn, (string)$_SESSION['username']);
-        $q = mysqli_query($conn, "SELECT user_id FROM users WHERE username = '$uname' LIMIT 1");
-        if ($q && ($r = mysqli_fetch_assoc($q))) { return (int)$r['user_id']; }
+        $q = cached_query($conn, "SELECT user_id FROM users WHERE username = '$uname' LIMIT 1");
+        if ($q && ($r = cached_fetch_assoc($q))) { return (int)$r['user_id']; }
     }
     return 0;
 }
