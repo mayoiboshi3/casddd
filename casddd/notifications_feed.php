@@ -21,6 +21,8 @@
  */
 require_once __DIR__ . '/src/db_config.php';
 require_once __DIR__ . '/src/session_guard.php';          // same login check the other pages use
+require_once __DIR__ . '/personnel_log.php';
+$nfCurrentUserId = (int) personnel_log_current_user_id($conn);
 if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }   // don't hold the session lock
 
 header('Content-Type: application/json; charset=utf-8');
@@ -78,7 +80,7 @@ $floor = $initial ? "AND COALESCE(dc.updated_at, dc.report_date) >= (NOW() - INT
 $events = [];
 function nf_add(&$events, $e) { if (!isset($events[$e['id']])) $events[$e['id']] = $e; }
 
-$caseSelect = "SELECT dc.case_id, dc.reference_id, dc.status, dc.severity, dc.source, dc.updated_at,
+$caseSelect = "SELECT dc.case_id, dc.reference_id, dc.status, dc.severity, dc.source, dc.updated_at, dc.reported_by,
         b.name AS barangay, d.disease_name, f.farmer_name,
         TIMESTAMPDIFF(SECOND, COALESCE(dc.updated_at, dc.report_date), NOW()) AS ago
     FROM disease_cases dc
@@ -98,6 +100,8 @@ function nf_urgent($r) {
 // 1) NEW disease reports + AI scans (one event per report, even if it lists several diseases)
 $rows = nf_rows($conn, "$caseSelect WHERE dc.case_id > $c0 $floor ORDER BY dc.case_id DESC LIMIT 80");
 foreach ((array)$rows as $r) {
+    // Only the creator stays quiet; every other staff member receives the event.
+    if ($nfCurrentUserId > 0 && (int)($r['reported_by'] ?? 0) === $nfCurrentUserId) continue;
     $key  = ($r['reference_id'] ?? '') !== '' ? $r['reference_id'] : 'c' . $r['case_id'];
     $scan = ($r['source'] ?? '') === 'scan';
     nf_add($events, [
@@ -130,6 +134,8 @@ if (!$initial) {
         WHERE dc.case_id <= $c0 AND dc.source = 'manual_report'
           AND dc.status IN ('verified','resolved','rejected')
           AND $stamp >= '$t0e'
+          AND NOT (dc.status = 'verified' AND COALESCE(dc.reported_by, 0) = $nfCurrentUserId
+                   AND $nfCurrentUserId > 0 AND dc.verified_at = dc.report_date)
         ORDER BY $stamp DESC LIMIT 80");
     $labels = ['verified' => 'Report verified', 'resolved' => 'Report resolved', 'rejected' => 'Report rejected'];
     foreach ((array)$rows as $r) {

@@ -146,13 +146,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
     }
     $photo_evidence_val = "'" . mysqli_real_escape_string($conn, implode(',', $saved_filenames)) . "'";
 
+    // Reports entered through the CASD staff form are verified by their creator.
+    $verified_by = $reported_by > 0 ? (string) $reported_by : 'NULL';
     $insertedCount = 0;
     foreach ($disease_ids as $raw_disease_id) {
         $d_id = mysqli_real_escape_string($conn, $raw_disease_id);
 
         $insertQuery = "INSERT INTO disease_cases
-            (reference_id, disease_id, farm_id, farmer_id, barangay_id, reported_by, growth_stage, date_planted, description, severity, photo_evidence, status, report_date)
-            VALUES ('$ref_id', '$d_id', 0, $farmer_id, '$brgy_id', $reported_by, '$stage', '$date_planted', '$full_desc', '$severity', $photo_evidence_val, 'pending', NOW())";
+            (reference_id, disease_id, farm_id, farmer_id, barangay_id, reported_by, growth_stage, date_planted, description, severity, photo_evidence, status, report_date, verified_by, verified_date, verified_at)
+            VALUES ('$ref_id', '$d_id', 0, $farmer_id, '$brgy_id', $reported_by, '$stage', '$date_planted', '$full_desc', '$severity', $photo_evidence_val, 'verified', NOW(), $verified_by, CURDATE(), NOW())";
 
         if (mysqli_query($conn, $insertQuery)) {
             $insertedCount++;
@@ -160,9 +162,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_report'])) {
     }
 
     if ($insertedCount > 0) {
-        ncr_notice('success', 'Report Submitted',
-            "A report has been created.\n\nReference: $ref_id",
-            'reports.php?view=disease&tab=pending', 3500);
+        ncr_notice('success', 'Report Created',
+            "The report was successfully created.\n\nReference: $ref_id",
+            'reports.php?view=disease&tab=verified', 3500);
         exit;
     } else {
         ncr_notice('error', 'Could Not Save Report', 'Something went wrong while saving the report. Please try again.');
@@ -248,6 +250,7 @@ function render_new_case_report_modal($conn, $today, $minDate) {
                 <div>
                     <p class="text-[9px] font-black text-emerald-600 uppercase tracking-widest mb-1">CASD Office — Manual Case Encoding</p>
                     <h3 class="font-black text-gray-900 text-xl tracking-tight">New Field <span class="text-emerald-600">Case Report</span></h3>
+                    <p class="text-xs text-gray-500 mt-2">Reports created by CASD are saved as Verified.</p>
                 </div>
                 <button onclick="closeCreateModal()" class="w-9 h-9 flex items-center justify-center rounded-xl bg-gray-100 text-gray-400 hover:bg-rose-50 hover:text-rose-500 text-2xl font-light transition-colors">&times;</button>
             </div>
@@ -425,7 +428,7 @@ function render_new_case_report_modal($conn, $today, $minDate) {
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
                         </svg>
-                        Submit Report for Review
+                        Create Report
                     </button>
 
                 </form>

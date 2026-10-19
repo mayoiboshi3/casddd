@@ -95,6 +95,21 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
     .rec-instruction-btn .rec-instruction-text { color:#1e293b; font-size:0.82rem; line-height:1.55; padding-top:1px; }
     .rec-instruction-btn.selected .rec-instruction-text { color:#065f46; }
 
+    #diseasePickerList .disease-choice { --category:#be123c; --tint:#fff1f2; align-items:center; border-color:var(--category); background:var(--tint); border-left-width:5px; }
+    #diseasePickerList .disease-choice.pest { --category:#b45309; --tint:#fffbeb; }
+    #diseasePickerList .disease-choice.deficiency { --category:#6d28d9; --tint:#f5f3ff; }
+    #diseasePickerList .disease-choice.healthy { --category:#047857; --tint:#ecfdf5; }
+    #diseasePickerList .disease-group-title { grid-column:1 / -1; font-size:0.8rem; font-weight:900; margin:12px 0 4px; }
+    #diseasePickerList .rec-instruction-text { min-width:0; overflow-wrap:anywhere; }
+    #diseasePickerList { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 14px; min-height:0; }
+    #diseasePickerList .disease-choice { margin-bottom:0; }
+    @media (max-width:680px) { #diseasePickerList { grid-template-columns:minmax(0,1fr); } }
+    #diseasePickerList .disease-choice.selected { box-shadow:0 0 0 2px var(--category) inset; }
+    #diseasePickerList .disease-photo { width:78px; height:78px; object-fit:cover; border-radius:8px; flex-shrink:0; background:#e2e8f0; }
+    #diseasePickerList .disease-category { display:block; color:var(--category); font-size:0.6rem; font-weight:900; text-transform:uppercase; letter-spacing:0.06em; margin-top:4px; }
+    #diseasePickerList .rec-check { margin-left:auto; }
+    #diseasePickerList .selected .rec-check { background:var(--category); border-color:var(--category); }
+
     /* Sticky save action at the bottom of the sidebar so it's always reachable */
     .sidebar-save-wrap { margin-top:auto; padding-top:14px; }
 
@@ -693,8 +708,8 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
         border:1px solid #e2e8f0;
         border-radius:20px;
         padding:24px;
-        width:min(480px,94vw);
-        max-height:82vh;
+        width:min(960px,96vw);
+        max-height:90vh;
         display:flex;
         flex-direction:column;
         z-index:131;
@@ -703,12 +718,12 @@ function render_review_modal($STATUS_FLOW, $allDiseasesForPicker = []) {
     ">
         <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;flex-shrink:0;">
             <div>
-                <p style="color:#92400e;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin-bottom:3px;">Confirm the Disease</p>
-                <h3 style="color:#0f172a;font-size:1.05rem;font-weight:900;margin:0;">Choose the Correct Disease</h3>
+                <p style="color:#92400e;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin-bottom:3px;">Confirm the Condition</p>
+                <h3 style="color:#0f172a;font-size:1.05rem;font-weight:900;margin:0;">Identify the Corn Condition</h3>
             </div>
             <button type="button" onclick="closeDiseasePicker()" style="background:rgba(15,23,42,0.06);border:1px solid rgba(15,23,42,0.1);color:#64748b;border-radius:8px;padding:5px 10px;cursor:pointer;font-size:1rem;line-height:1;flex-shrink:0;margin-left:8px;">&#10005;</button>
         </div>
-        <p style="color:#78716c;font-size:0.65rem;font-weight:700;margin-bottom:6px;line-height:1.5;">Select up to 3 diseases below — they'll be combined into this report's disease info (name, description, treatment) as one file, clearing its "Other / Unidentified" status.</p>
+        <p style="color:#78716c;font-size:0.65rem;font-weight:700;margin-bottom:6px;line-height:1.5;">Select up to 3 conditions from the categories below, then confirm your selection to identify this report.</p>
         <p id="diseasePickerCount" style="color:#92400e;font-size:0.62rem;font-weight:900;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">0 / 3 selected</p>
         <div id="diseasePickerList" style="overflow-y:auto;flex-grow:1;scrollbar-width:thin;"></div>
         <div style="flex-shrink:0;margin-top:14px;padding-top:14px;border-top:1px solid rgba(15,23,42,0.08);">
@@ -1103,21 +1118,60 @@ function openDiseasePicker() {
 
 function renderDiseasePickerList() {
     const listEl = document.getElementById('diseasePickerList');
-    listEl.innerHTML = ALL_DISEASES.map(d => {
+    const groups = [
+        { category:'disease', label:'Diseases', color:'#be123c' },
+        { category:'pest', label:'Pests', color:'#b45309' },
+        { category:'deficiency', label:'Deficiencies', color:'#6d28d9' },
+        { category:'healthy', label:'Healthy', color:'#047857' }
+    ];
+    listEl.innerHTML = groups.map(group => {
+        const options = ALL_DISEASES.filter(d => diseasePickerVisual(d.disease_name).category === group.category)
+            .sort((a, b) => a.disease_name.localeCompare(b.disease_name));
+        if (!options.length) return '';
+        return `<h4 class="disease-group-title" style="color:${group.color}">${group.label}</h4>` + options.map(d => {
         const isSelected = _diseasePickerSelected.includes(d.disease_id);
         const isMaxedOut = !isSelected && _diseasePickerSelected.length >= MAX_REASSIGN_DISEASES;
+        const visual = diseasePickerVisual(d.disease_name);
+        const safeName = String(d.disease_name).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         return `
-        <button type="button" onclick="toggleReassignDisease(${d.disease_id})" class="rec-instruction-btn${isSelected ? ' selected' : ''}"
+        <button type="button" onclick="toggleReassignDisease(${d.disease_id})" aria-pressed="${isSelected}" class="rec-instruction-btn disease-choice ${visual.category}${isSelected ? ' selected' : ''}"
             style="width:100%;text-align:left;${isMaxedOut ? 'opacity:0.35;cursor:not-allowed;' : ''}" ${isMaxedOut ? 'disabled' : ''}>
-            <div class="rec-check">${isSelected ? '✓' : '🌽'}</div>
-            <div class="rec-instruction-text"><strong>${d.disease_name}</strong></div>
+            ${visual.file ? `<img class="disease-photo" src="${encodeURI('uploads/corn/' + visual.file)}" alt="${safeName}" loading="lazy">` : ''}
+            <div class="rec-instruction-text"><strong>${safeName}</strong><span class="disease-category">${visual.label}</span></div>
+            <div class="rec-check">${isSelected ? '✓' : ''}</div>
         </button>
     `;
-    }).join('') || '<p style="color:#475569;font-size:0.7rem;font-weight:700;text-align:center;padding:20px;">No diseases on file.</p>';
+        }).join('');
+    }).join('') || '<p style="color:#475569;font-size:0.7rem;font-weight:700;text-align:center;padding:20px;">No conditions on file.</p>';
 
     document.getElementById('diseasePickerCount').innerText = `${_diseasePickerSelected.length} / ${MAX_REASSIGN_DISEASES} selected`;
     document.getElementById('diseasePickerConfirmBtn').disabled = _diseasePickerSelected.length === 0;
     document.getElementById('diseasePickerConfirmBtn').style.opacity = _diseasePickerSelected.length === 0 ? '0.4' : '1';
+}
+
+// Explicit aliases account for the uploaded filenames' spelling and local pest names.
+function diseasePickerVisual(name) {
+    const n = String(name).toLowerCase();
+    const images = [
+        [/nitrogen/, 'Deficiency/Nitrogen Deficiency.jpg'],
+        [/phosphorus/, 'Deficiency/Phosphorus Deficiency.jpg'],
+        [/potassium/, 'Deficiency/Potassium Deficiency.jpg'],
+        [/borer|bagumbong/, 'Pest/Bagumbong or Corn Borer.jpg'],
+        [/armyworm/, 'Pest/Fall Armyworm (FAW).jpg'],
+        [/planthopper|ngusong/, 'Pest/Ngusong Kabayo sa Mais or Corn Planthopper.jpg'],
+        [/earworm|uod sa puso/, 'Pest/Uod sa Puso or Corn Earworm.jpg'],
+        [/stalk rot/, 'Bacterial Stalk rot of Maize.jpg'],
+        [/banded/, 'banded Leaf and Shealth Blight.jpg'],
+        [/rust/, 'Common Rust.jpg'],
+        [/downy|donwny/, 'Corn Donwny Mildew.jpg'],
+        [/mosaic/, 'Corn Mosaic.jpg'],
+        [/gr[ae]y leaf/, 'Gray Leaf Spot.jpg'],
+        [/northern/, 'Northern Corn Leaf Blight.jpg']
+    ];
+    const match = images.find(([pattern]) => pattern.test(n));
+    const file = match ? match[1] : '';
+    const category = /healthy/.test(n) ? 'healthy' : /deficien/.test(n) ? 'deficiency' : file.startsWith('Pest/') ? 'pest' : 'disease';
+    return { file, category, label: {disease:'Disease', pest:'Pest', deficiency:'Deficiency', healthy:'Healthy'}[category] };
 }
 
 function toggleReassignDisease(diseaseId) {

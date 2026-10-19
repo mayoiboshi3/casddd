@@ -17,6 +17,8 @@
 $__cntBase = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
 $__cntFeed = $__cntBase . '/notifications_feed.php';
 $__cntChat = $__cntBase . '/chat_feed.php';
+// session_guard.php guarantees this staff identity, even before a page loads its DB connection.
+$__cntUser = (int) ($_SESSION['user_id'] ?? 0);
 // One token per login session. If the browser last saw a different token, this is a NEW LOGIN -> one summary pop-up only.
 // (If your logout does not destroy the session, also run  unset($_SESSION['casd_notif_login']);  there.)
 $__cntLogin = '';
@@ -68,6 +70,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
 :is(.dr-row,.ph-row).cnt-hl{position:relative;background:linear-gradient(90deg,#fff6d6,#fff 70%) !important;box-shadow:inset 0 0 0 1px rgba(251,192,45,.4),inset 4px 0 0 #fbc02d;animation:none}
 :is(.dr-row,.ph-row).cnt-hl::after{content:attr(data-cnt-label);position:absolute;top:0;right:16px;background:#10b981;color:#fff;font:900 9px Inter,system-ui,sans-serif;letter-spacing:.14em;padding:3px 10px 4px;border-radius:0 0 10px 10px;box-shadow:0 4px 10px -3px rgba(16,185,129,.6);pointer-events:none}
 :is(.dr-row,.ph-row).cnt-hl[data-cnt-label="UPDATED"]::after{background:#3b82f6;box-shadow:0 4px 10px -3px rgba(59,130,246,.6)}
+:is(.dr-row,.ph-row).cnt-hl[data-cnt-label="NEW MESSAGE"]::after{background:#0e7490;box-shadow:none}
 @keyframes cntPulse{0%{box-shadow:0 0 0 0 rgba(239,68,68,.65)}70%{box-shadow:0 0 0 12px rgba(239,68,68,0)}100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}}
 @keyframes cntBump{0%{transform:translateY(-50%) scale(1)}35%{transform:translateY(-50%) scale(1.45)}100%{transform:translateY(-50%) scale(1)}}
 @keyframes cntSlide{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:none}}
@@ -84,6 +87,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
     var FEED = <?= json_encode($__cntFeed, JSON_UNESCAPED_SLASHES) ?>;
     var CHAT_FEED = <?= json_encode($__cntChat, JSON_UNESCAPED_SLASHES) ?>;
     var LOGIN = <?= json_encode($__cntLogin) ?>;
+    var USER_KEY = <?= json_encode((string)$__cntUser) ?>;
     var KEY = 'casd_notif_v2', INTERVAL = 10000, HIDDEN_EVERY = 3, MAX_ITEMS = 100, MAX_TOASTS = 4, TOAST_MS = 12000, HL_MS = 7 * 24 * 60 * 60 * 1000, SCROLL_KEY = 'casd_notif_scroll';
     var KINDS = {
         report: { tag: 'Disease report', c: '#f97316', bg: 'rgba(249,115,22,.12)', view: 'disease', p: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
@@ -93,6 +97,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
         digest: { tag: 'Updates',        c: '#f59e0b', bg: 'rgba(245,158,11,.14)', view: 'disease', p: 'M15 17h5l-1.4-1.4A2 2 0 0118 14.2V11a6 6 0 10-12 0v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0a3 3 0 11-6 0m6 0H9' }
     };
 
+    KEY += ':' + USER_KEY;
     var state = load(), busy = false, ownWriteAt = 0, firstPoll = true, ticks = 0, flash = false, newLogin = false, chatNewLogin = false;
     var baseTitle = document.title.replace(/^(\(\d+\+?\)|\u25CF NEW REPORT|\u25CF NEW MESSAGE|\uD83D\uDCAC \d+)\s*/, '');
     var toasts, badges = [];
@@ -217,7 +222,8 @@ if (session_status() === PHP_SESSION_ACTIVE) {
             var k = keyOf(it); if (k) map[k] = it.kind === 'status' ? 'UPDATED' : 'NEW';
         }
         Array.prototype.forEach.call(document.querySelectorAll(ROW_SEL), function (row) {
-            var label = map[rowKey(row)];
+            var key = rowKey(row);
+            var label = cstate && cstate.unread[key] > 0 ? 'NEW MESSAGE' : map[key];
             if (label) { row.classList.add('cnt-hl'); row.setAttribute('data-cnt-label', label); if (!first) first = row; }
             else if (row.classList.contains('cnt-hl')) { row.classList.remove('cnt-hl'); row.removeAttribute('data-cnt-label'); }
         });
@@ -239,7 +245,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
             state = load();
             state.items.forEach(function (i) { if (i.hl && keyOf(i) === k) { i.hl = false; ch = true; } });
             if (ch) save();
-            row.classList.remove('cnt-hl'); row.removeAttribute('data-cnt-label');
+            chatClear(k); // Opening the report also acknowledges its new farmer messages.
         }, true);
         highlightRows();
     }
@@ -307,7 +313,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
     // (seen[chatKey] = count). A chat alerts only when its own count goes up -- so one chat can never re-announce
     // another, a reload or a second tab can never replay old messages, and nothing depends on a shared timestamp.
     // The very first check on a browser only records the current counts (no alerts for old messages).
-    var CKEY = 'casd_chat_v1', CHAT_MS = 5000, CHAT_HIDDEN_EVERY = 6, CHAT_TOAST_MS = 15000;
+    var CKEY = 'casd_chat_v1:' + USER_KEY, CHAT_MS = 5000, CHAT_HIDDEN_EVERY = 6, CHAT_TOAST_MS = 15000;
     var cstate = chatLoad(), chatBusy = false, chatTicks = 0, chatPops = {};
 
     function chatLoad() {
@@ -325,7 +331,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
         var p = chatPops[key]; if (!p) return;
         delete chatPops[key]; p.gone(instant);
     }
-    function chatClear(key) { chatDrop(key, true); if (cstate.unread[key]) { delete cstate.unread[key]; chatSave(); } render(); }
+    function chatClear(key) { cstate = chatLoad(); chatDrop(key, true); if (cstate.unread[key]) { delete cstate.unread[key]; chatSave(); } render(); highlightRows(); }
 
     function chatToast(a) {
         var c = a.c, key = c.key, total = cstate.unread[key] || a.n;
@@ -388,7 +394,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
                     if (c.count > prev) {
                         cstate.seen[c.key] = c.count;
                         cstate.touch = cstate.touch || {}; cstate.touch[c.key] = Date.now(); quietStatus(c.key);
-                        if (chatIsOpen(c.key)) return;                             // reading it right now
+                        if (chatIsOpen(c.key)) { delete cstate.unread[c.key]; return; }
                         cstate.unread[c.key] = (cstate.unread[c.key] || 0) + (c.count - prev);
                         alerts.push({ c: c, n: c.count - prev });
                     } else if (c.count < prev) {                                   // replies removed: follow quietly, never alert
@@ -399,7 +405,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
                 cstate.init = true;
                 var wasCNew = chatNewLogin; if (LOGIN) cstate.login = LOGIN; chatNewLogin = false;
                 var tk = cstate.touch || {}; Object.keys(tk).forEach(function (k) { if (Date.now() - tk[k] > 600000) delete tk[k]; });
-                chatSave(); render();
+                chatSave(); render(); highlightRows();
                 if (alerts.length > (wasCNew ? 1 : 3)) {                        // several chats at once -> one pop-up
                     var tot = 0; alerts.forEach(function (a) { tot += a.n; });
                     bump(); digestToast('chats', 'reports.php?view=disease', 'Several chats have new messages', tot + ' new farmer messages');
@@ -452,7 +458,7 @@ if (session_status() === PHP_SESSION_ACTIVE) {
         document.addEventListener('visibilitychange', function () { if (!document.hidden) { flash = false; clearCurrentView(); render(); poll(); chatPoll(); } });
         window.addEventListener('storage', function (e) {   // other tab
             if (e.key === KEY) { state = load(); render(); highlightRows(); }
-            if (e.key === CKEY) { cstate = chatLoad(); Object.keys(chatPops).forEach(function (k) { if (!cstate.unread[k]) chatDrop(k, true); }); render(); }   // read in another tab -> close here too
+            if (e.key === CKEY) { cstate = chatLoad(); Object.keys(chatPops).forEach(function (k) { if (!cstate.unread[k]) chatDrop(k, true); }); render(); highlightRows(); }   // read in another tab -> close here too
         });
     }
     function boot() { if (document.prerendering) { document.addEventListener('prerenderingchange', boot, { once: true }); return; } start(); }
