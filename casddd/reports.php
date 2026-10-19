@@ -224,6 +224,53 @@ function casd_alert_redirect($type, $title, $message, $url, $autoCloseMs = 0) {
 $manualOnlySql   = "`source` = 'manual_report'";
 $manualOnlySqlDc = "dc.`source` = 'manual_report'";
 
+// --- PERSONNEL LOG FOR AI SCANS: who scanned, who/what verified, who resolved ---
+// Verification is done by the AI (not a staff member); the resolver comes from the same personnel log
+// the Disease Reports use (personnel_log_build). Best-effort lookup of a person's name by step.
+function casd_scan_find_person($row, $needle) {
+    try { $p = personnel_log_build($row); } catch (Throwable $e) { return null; }
+    if (!is_array($p)) { return null; }
+    $pick = function ($v) {
+        if (is_string($v) && trim($v) !== '') { return trim($v); }
+        if (is_array($v)) {
+            foreach (['name', 'full_name', 'fullname', 'user_name', 'username', 'by', 'user', 'person'] as $k) {
+                if (!empty($v[$k]) && is_string($v[$k])) { return trim($v[$k]); }
+            }
+        }
+        return null;
+    };
+    foreach ($p as $k => $v) {
+        if (is_string($k) && stripos($k, $needle) !== false) { $n = $pick($v); if ($n) { return $n; } }
+        if (is_array($v)) {
+            $tag = '';
+            foreach (['label', 'type', 'action', 'step', 'key', 'status'] as $tk) { if (!empty($v[$tk]) && is_string($v[$tk])) { $tag .= ' ' . $v[$tk]; } }
+            if ($tag !== '' && stripos($tag, $needle) !== false) { $n = $pick($v); if ($n) { return $n; } }
+        }
+    }
+    return null;
+}
+function casd_scan_personnel($row, $farmer) {
+    $fmt = function ($ts) { return $ts ? date('M d, Y g:i A', strtotime($ts)) : null; };
+    $log = [];
+    $log[] = ['label' => 'Scanned by',  'name' => $farmer, 'at' => $fmt($row['report_date'] ?? null)];
+    $log[] = ['label' => 'Verified by', 'name' => 'AI (automatic)', 'at' => $fmt(!empty($row['verified_at']) ? $row['verified_at'] : ($row['report_date'] ?? null))];
+    if (($row['status'] ?? '') === 'resolved') {
+        $who = casd_scan_find_person($row, 'resolv');
+        if (!$who && (int)($row['resolved_by'] ?? 0) > 0) { $who = 'CASD staff'; }
+        $log[] = ['label' => 'Resolved by', 'name' => $who ?: '—', 'at' => $fmt($row['resolved_at'] ?? null)];
+    }
+    return $log;
+}
+
+// --- AI SCANS ARE VERIFIED AUTOMATICALLY ---
+// The AI identifying the disease IS the verification, so a scan never waits for CASD review.
+// The database trigger in ai_scan_auto_verify.sql does this the moment the app inserts the row;
+// this is the safety net for any scan that still arrives as 'pending' (no trigger, older app build).
+// verified_by stays empty on purpose: nobody at CASD verified it, the AI did.
+mysqli_query($conn, "UPDATE disease_cases
+    SET status = 'verified', verified_at = COALESCE(verified_at, NOW()), verified_date = COALESCE(verified_date, CURDATE())
+    WHERE `source` = 'scan' AND status = 'pending'");
+
 // --- PERSONNEL LOG: who created / verified / rejected each case. Exposes the
 // helpers used below (needs verified_at / rejected_by / rejected_at / resolved_by / resolved_at on disease_cases).
 require_once __DIR__ . "/personnel_log.php";
@@ -353,6 +400,34 @@ if ($_SERVER["REQUEST_METHOD"] === "GET" && isset($_GET['msg_poll'])) {
     if (!$state) { casd_json_exit(['ok' => false, 'error' => 'Case not found.']); }
     if ($state['sig'] === (string) ($_GET['sig'] ?? '')) { casd_json_exit(['ok' => true, 'changed' => false]); }
     casd_json_exit(['ok' => true, 'changed' => true] + $state);
+}
+
+// 1b. RESOLVE AN AI SCAN (AI Scans view). Scans are already Verified, so the only step left is Resolved.
+// Every row sharing the scan's reference_id is resolved together, same as Disease Reports.
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['resolve_scan'])) {
+    $scanId = (int)($_POST['case_id'] ?? 0);
+    $sq     = mysqli_query($conn, "SELECT reference_id, status FROM disease_cases WHERE case_id = $scanId AND `source` = 'scan' LIMIT 1");
+    $sRow   = $sq ? mysqli_fetch_assoc($sq) : null;
+    if ($sRow && in_array($sRow['status'], ['pending', 'verified'], true)) {
+        $actorId  = personnel_log_current_user_id($conn);
+        $actorSql = $actorId > 0 ? (int)$actorId : 'NULL';
+        $sRef     = trim((string)$sRow['reference_id']);
+        $sWhere   = $sRef !== ''
+            ? "reference_id = '" . mysqli_real_escape_string($conn, $sRef) . "' AND `source` = 'scan'"
+            : "case_id = $scanId";
+        $ok = mysqli_query($conn, "UPDATE disease_cases
+            SET status = 'resolved', resolved_by = $actorSql, resolved_at = NOW(), updated_at = NOW(),
+                verified_at = COALESCE(verified_at, NOW()), verified_date = COALESCE(verified_date, CURDATE())
+            WHERE $sWhere AND status IN ('pending','verified')");
+        if ($ok) {
+            casd_alert_redirect('success', 'Status Updated', 'The scan was marked as resolved successfully.', 'reports.php?view=scans&tab=resolved', 2200);
+            exit;
+        }
+        casd_alert_redirect('error', 'Could Not Resolve', 'Something went wrong while saving. Please try again.', 'reports.php?view=scans');
+        exit;
+    }
+    casd_alert_redirect('warning', 'Action Not Available', 'This scan is already resolved or could not be found.', 'reports.php?view=scans&tab=resolved');
+    exit;
 }
 
 // 2. HANDLE DATABASE UPDATE
@@ -772,14 +847,17 @@ $stats_query = mysqli_query($conn, "SELECT COUNT(DISTINCT $refKeySql) as total,
 $stats     = mysqli_fetch_assoc($stats_query);
 
 // AI scans are counted on their own and never mixed into the report numbers above.
-$scanStats = ['total' => 0, 'week' => 0];
+$scanStats = ['total' => 0, 'week' => 0, 'verified' => 0, 'resolved' => 0];
 $ss_q = mysqli_query($conn, "SELECT
     COUNT(DISTINCT COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id))) AS total,
     COUNT(DISTINCT CASE WHEN report_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-          THEN COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id)) END) AS week
+          THEN COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id)) END) AS week,
+    COUNT(DISTINCT CASE WHEN status = 'verified' THEN COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id)) END) AS verified,
+    COUNT(DISTINCT CASE WHEN status = 'resolved' THEN COALESCE(NULLIF(reference_id,''), CONCAT('c', case_id)) END) AS resolved
     FROM disease_cases WHERE `source` = 'scan'");
 if ($ss_q && $ss_row = mysqli_fetch_assoc($ss_q)) {
-    $scanStats = ['total' => (int)$ss_row['total'], 'week' => (int)$ss_row['week']];
+    $scanStats = ['total' => (int)$ss_row['total'], 'week' => (int)$ss_row['week'],
+                  'verified' => (int)$ss_row['verified'], 'resolved' => (int)$ss_row['resolved']];
 }
 $activeTab = $_GET['tab'] ?? 'pending';
 
@@ -1113,6 +1191,8 @@ $tableRows = [];
 
     .dr-status-pill { display:none; }
     #drPanel[data-tab="all"] .dr-status-pill { display:inline-block; }
+    .scan-status-pill { display:none; }
+    #scanPanel[data-tab="all"] .scan-status-pill { display:inline-block; }
     .sev-badge { display:inline-block; font-size:0.58rem; font-weight:900; text-transform:uppercase; letter-spacing:0.1em; padding:2px 8px; border-radius:999px; margin-top:3px; }
     .sev-low      { background:#d1fae5; color:#065f46; }
     .sev-moderate { background:#fef3c7; color:#92400e; }
@@ -1620,8 +1700,9 @@ if ($isAjax && $CASD_AJAX_SKIP_LAYOUT && $_SERVER['REQUEST_METHOD'] === 'GET' &&
 <?php
 // ═══ AI SCANS VIEW ═══
 // Cases the AI image detector classified (disease_cases.source = 'scan').
-// They are a plain log: no Pending -> Verified -> Resolved review, and they are never counted in
-// the Disease Reports tabs or stats. Everything else (source = 'manual_report') is a manual report
+// They are verified automatically by the AI (no CASD review step), so they start as Verified and
+// can be marked Resolved from here. They are kept apart from manual reports: never counted in the
+// Disease Reports tabs or stats. Everything else (source = 'manual_report') is a manual report
 // and shows up under Disease Reports.
 //
 // How a scan row is stored (so this view reads it the same way):
@@ -1643,6 +1724,17 @@ if ($filterDateTo !== '') {
     $scanDateSql .= " AND dc.report_date <= '" . mysqli_real_escape_string($conn, $filterDateTo) . " 23:59:59'";
 }
 $scanHighlightId = isset($_GET['scan_id']) ? (int)$_GET['scan_id'] : 0;   // set by the dashboard deep link
+// Verified / Resolved tabs (normal page load, so the tab lives in the URL). A dashboard deep link to a
+// resolved scan opens the Resolved tab so the highlighted row is actually on screen.
+$scanTab = $_GET['tab'] ?? '';
+if (!in_array($scanTab, ['all', 'verified', 'resolved'], true)) {
+    $scanTab = 'verified';
+    if ($scanHighlightId) {
+        $hl_q = mysqli_query($conn, "SELECT status FROM disease_cases WHERE case_id = $scanHighlightId AND `source` = 'scan' LIMIT 1");
+        if ($hl_q && ($hl_r = mysqli_fetch_assoc($hl_q)) && $hl_r['status'] === 'resolved') { $scanTab = 'resolved'; }
+    }
+}
+$scanCounts = ['all' => 0, 'verified' => 0, 'resolved' => 0];
 $scanLimit       = 500;
 $scanHasFilters  = ($filterBarangayId || $filterDateFrom !== '' || $filterDateTo !== '');
 
@@ -1679,14 +1771,15 @@ $scanParse = function ($desc) {
 // file); a scan with an empty reference_id is kept on its own instead of being merged with others.
 $scanGroups = [];
 $scanOrder  = [];
-$scan_q = mysqli_query($conn, "SELECT dc.case_id, dc.reference_id, dc.report_date, dc.description,
-            dc.farmer_id, dc.disease_id, dc.photo_evidence, dc.latitude, dc.longitude, dc.gps_accuracy,
+$scan_q = mysqli_query($conn, "SELECT dc.*,
             $scanFarmerSelect
-            b.name AS brgy_name, d.disease_name
+            b.name AS brgy_name, d.disease_name,
+            " . personnel_log_select_sql() . "
         FROM disease_cases dc
         LEFT JOIN barangays b ON dc.barangay_id = b.id
         LEFT JOIN diseases d  ON dc.disease_id  = d.disease_id
         $scanFarmerJoin
+        " . personnel_log_join_sql() . "
         WHERE dc.`source` = 'scan' $scanBrgySql $scanDateSql
         ORDER BY dc.report_date DESC, dc.case_id ASC
         LIMIT $scanLimit");
@@ -1707,6 +1800,19 @@ if ($scan_q) {
         $scanGroups[$key]['case_ids'][] = (int)$r['case_id'];
     }
 }
+// Tab counts (respect the barangay/date filters). Any leftover 'pending' scan counts as verified.
+foreach ($scanOrder as $__k) {
+    $__st = $scanGroups[$__k]['primary']['status'] === 'resolved' ? 'resolved' : 'verified';
+    $scanCounts[$__st]++;
+    $scanCounts['all']++;
+}
+$scanTabQs = function ($tab) use ($filterBarangayId, $filterDateFrom, $filterDateTo) {
+    $q = ['view' => 'scans', 'tab' => $tab];
+    if ($filterBarangayId)       { $q['brgy_filter'] = $filterBarangayId; }
+    if ($filterDateFrom !== '')  { $q['date_from']   = $filterDateFrom; }
+    if ($filterDateTo !== '')    { $q['date_to']     = $filterDateTo; }
+    return '?' . http_build_query($q);
+};
 ?>
 
 <div class="bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl">
@@ -1715,7 +1821,7 @@ if ($scan_q) {
             <div class="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center shrink-0 text-2xl">&#128247;</div>
             <div>
                 <h3 class="text-lg font-bold text-gray-900 tracking-tight">AI Scans</h3>
-                <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Photos the AI scanned and classified. Logged automatically, nothing to review here. Everything else is a manual report under Disease Reports.</p>
+                <p class="text-gray-400 font-medium text-[11px] mt-0.5 tracking-tight">Photos the AI scanned and classified. Verified automatically by the AI, so there is nothing to review. Mark a scan as Resolved once it has been dealt with. Manual reports are under Disease Reports.</p>
             </div>
         </div>
         <div class="flex gap-3 shrink-0">
@@ -1726,10 +1832,21 @@ if ($scan_q) {
         </div>
     </div>
 
-    <div id="scanPanel">
+    <div id="scanPanel" data-tab="<?= htmlspecialchars($scanTab) ?>">
+
+    <!-- Tabs: same browser-tab look as Disease Reports. AI scans are never Pending (the AI verifies them). -->
+    <div class="dr-tabs-wrap">
+        <div class="dr-tabs">
+            <?php foreach (['all' => 'All', 'verified' => 'Verified', 'resolved' => 'Resolved'] as $__tk => $__tl): ?>
+                <a href="<?= htmlspecialchars($scanTabQs($__tk)) ?>" class="<?= $scanTab === $__tk ? 'dr-tab dr-tab-active' : 'dr-tab' ?>">
+                    <?= $__tl ?> <span class="dr-tab-count"><?= (int)$scanCounts[$__tk] ?></span>
+                </a>
+            <?php endforeach; ?>
+        </div>
+    </div>
 
     <!-- Search is instant/client-side; barangay + date submit as a normal GET (this view has no AJAX panel). -->
-    <div class="pt-1 flex items-center justify-between flex-wrap gap-4">
+    <div class="pt-5 flex items-center justify-between flex-wrap gap-4">
         <div class="flex items-center gap-2.5 flex-wrap flex-1 min-w-0">
             <div class="relative flex-1 min-w-[180px]">
                 <svg class="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg>
@@ -1740,6 +1857,7 @@ if ($scan_q) {
 
             <form method="get" class="flex items-center gap-2 flex-wrap">
                 <input type="hidden" name="view" value="scans">
+                <input type="hidden" name="tab" value="<?= htmlspecialchars($scanTab) ?>">
 
                 <select name="brgy_filter" onchange="this.form.submit()"
                     class="filter-input text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 uppercase tracking-wide">
@@ -1766,17 +1884,19 @@ if ($scan_q) {
                     Filter
                 </button>
                 <?php if ($scanHasFilters): ?>
-                <a href="?view=scans" class="text-[10px] font-black text-gray-400 hover:text-gray-600 uppercase underline">Clear</a>
+                <a href="?view=scans&tab=<?= htmlspecialchars($scanTab) ?>" class="text-[10px] font-black text-gray-400 hover:text-gray-600 uppercase underline">Clear</a>
                 <?php endif; ?>
             </form>
         </div>
     </div>
 
     <div id="scanList" class="divide-y divide-gray-50 mt-4">
-        <?php if (count($scanOrder) > 0):
+        <?php if ($scanCounts[$scanTab] > 0):
             foreach ($scanOrder as $__sref):
                 $sg        = $scanGroups[$__sref];
                 $srow      = $sg['primary'];
+                $sStatus   = $srow['status'] === 'resolved' ? 'resolved' : 'verified';
+                if ($scanTab !== 'all' && $sStatus !== $scanTab) { continue; }
                 // Farmer: the farmers table (by farmer_id), else "Farmer #id".
                 $sFarmer   = !empty($srow['farmer_name_db']) ? $srow['farmer_name_db']
                              : ((int)($srow['farmer_id'] ?? 0) > 0 ? 'Farmer #' . (int)$srow['farmer_id'] : '— Unassigned —');
@@ -1798,6 +1918,9 @@ if ($scan_q) {
                                  && $__sLabel !== null && preg_match('/^(other|unidentified|unknown)\b/i', $__sLabel);
                 $scanModal = [
                     'case_id'        => (int)$srow['case_id'],
+                    'status'         => $sStatus,
+                    'personnel'      => casd_scan_personnel($srow, $sFarmer),
+                    'resolved_at'    => ($sStatus === 'resolved' && !empty($srow['resolved_at'])) ? date('M d, Y g:i A', strtotime($srow['resolved_at'])) : null,
                     'unidentified'   => (bool)$sUnidentified,
                     'reference_id'   => (string)($srow['reference_id'] ?? ''),
                     'farmer'         => $sFarmer,
@@ -1817,7 +1940,7 @@ if ($scan_q) {
                 ]));
         ?>
         <div class="dr-row scan-row" data-ref="<?= htmlspecialchars(trim((string)($srow['reference_id'] ?? '')) !== '' ? $srow['reference_id'] : 'c' . $srow['case_id']) ?>" <?= $sIsTarget ? 'id="scanTargetRow"' : '' ?>
-             style="border-left:3px solid #10b981;<?= $sIsTarget ? 'background:#ecfdf5;' : '' ?>"
+             style="border-left:3px solid <?= $sStatus === 'resolved' ? '#059669' : '#2563eb' ?>;<?= $sIsTarget ? 'background:#ecfdf5;' : '' ?>"
              data-search="<?= htmlspecialchars($sSearch) ?>"
              role="button" tabindex="0"
              onclick='openScanModal(<?= htmlspecialchars(json_encode($scanModal), ENT_QUOTES, 'UTF-8') ?>)'
@@ -1848,15 +1971,18 @@ if ($scan_q) {
                 <?php if ($sConf !== null): ?>
                 <span class="sev-badge <?= $sConfClass ?>"><?= htmlspecialchars($sConf) ?> confidence</span>
                 <?php endif; ?>
+                <span class="sev-badge scan-status-pill" style="<?= $sStatus === 'resolved' ? 'background:#d1fae5;color:#065f46' : 'background:#dbeafe;color:#1d4ed8' ?>"><?= $sStatus === 'resolved' ? 'Resolved' : 'Verified' ?></span>
             </div>
         </div>
         <?php endforeach; else: ?>
             <div class="dr-empty">
                 <p class="text-xs font-bold uppercase tracking-widest">
                     <?php if ($scanHasFilters): ?>
-                        No AI scans match these filters.
+                        No <?= htmlspecialchars($scanTab) ?> AI scans match these filters.
+                    <?php elseif ($scanTab === 'resolved'): ?>
+                        No resolved AI scans yet.
                     <?php else: ?>
-                        No AI scans yet. They appear here when a case is saved with source = scan.
+                        No verified AI scans right now. New scans from the app appear here automatically.
                     <?php endif; ?>
                 </p>
             </div>
@@ -1942,6 +2068,31 @@ if ($scan_q) {
                     <a id="scanModalMap" href="#" target="_blank" rel="noopener" style="display:inline-block;margin-top:4px;color:#059669;font-size:0.7rem;font-weight:800;text-decoration:underline;">Open in Maps</a>
                 </div>
 
+                <div style="border-top:1px solid #f1f5f9;padding-top:12px;">
+                    <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 8px;">Personnel Log</p>
+                    <div id="scanModalLog" style="display:flex;flex-direction:column;gap:8px;"></div>
+                </div>
+
+                <div style="border-top:1px solid #f1f5f9;padding-top:12px;">
+                    <p style="color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 6px;">Status</p>
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+                        <div style="min-width:0;">
+                            <span id="scanModalStatus" style="display:inline-block;font-size:0.7rem;font-weight:900;padding:4px 12px;border-radius:999px;"></span>
+                            <p id="scanModalStatusNote" style="color:#94a3b8;font-size:10px;font-weight:700;margin:5px 0 0;"></p>
+                        </div>
+                        <div id="scanResolveWrap" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                            <button type="button" id="scanResolveAsk" onclick="scanResolveStep(true)" style="background:#059669;color:#fff;border:0;border-radius:12px;padding:9px 16px;font-size:0.68rem;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;">Mark as Resolved</button>
+                            <form id="scanResolveForm" method="post" style="margin:0;display:none;align-items:center;gap:8px;flex-wrap:wrap;">
+                                <input type="hidden" name="resolve_scan" value="1">
+                                <input type="hidden" name="case_id" id="scanResolveCaseId" value="">
+                                <span style="color:#475569;font-size:0.72rem;font-weight:800;">Resolve this scan?</span>
+                                <button type="button" onclick="scanResolveStep(false)" style="background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;border-radius:12px;padding:8px 14px;font-size:0.68rem;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;">Cancel</button>
+                                <button type="submit" style="background:#059669;color:#fff;border:0;border-radius:12px;padding:9px 16px;font-size:0.68rem;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;">Yes, resolve</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
             </div>
         </div>
     </div>
@@ -2007,6 +2158,38 @@ function openScanModal(d) {
         img.removeAttribute('src'); showNoPhoto();
     }
 
+    // Status: scans are verified by the AI; the only action left is Resolve.
+    var stEl = document.getElementById('scanModalStatus'), stNote = document.getElementById('scanModalStatusNote'), resolveWrap = document.getElementById('scanResolveWrap');
+    scanResolveStep(false);
+    if (d.status === 'resolved') {
+        stEl.textContent = 'Resolved'; stEl.style.background = '#d1fae5'; stEl.style.color = '#065f46';
+        stNote.textContent = d.resolved_at ? 'Resolved on ' + d.resolved_at : '';
+        resolveWrap.style.display = 'none';
+    } else {
+        stEl.textContent = 'Verified by AI'; stEl.style.background = '#dbeafe'; stEl.style.color = '#1d4ed8';
+        stNote.textContent = 'No CASD review needed';
+        resolveWrap.style.display = 'flex';
+        document.getElementById('scanResolveCaseId').value = d.case_id;
+    }
+
+    // Personnel log: who scanned, who verified (the AI), who resolved
+    var logEl = document.getElementById('scanModalLog');
+    logEl.innerHTML = '';
+    (d.personnel || []).forEach(function (p) {
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;gap:12px;';
+        var left = document.createElement('div'); left.style.minWidth = '0';
+        var lab = document.createElement('p'); lab.textContent = p.label;
+        lab.style.cssText = 'color:#94a3b8;font-size:0.58rem;font-weight:900;letter-spacing:0.12em;text-transform:uppercase;margin:0;';
+        var nm = document.createElement('p'); nm.textContent = p.name || '—';
+        nm.style.cssText = 'color:#0f172a;font-size:0.8rem;font-weight:700;margin:0;word-break:break-word;';
+        left.appendChild(lab); left.appendChild(nm);
+        var at = document.createElement('span'); at.textContent = p.at || '';
+        at.style.cssText = 'color:#94a3b8;font-size:0.68rem;font-weight:700;white-space:nowrap;';
+        row.appendChild(left); row.appendChild(at);
+        logEl.appendChild(row);
+    });
+
     // Location (only when the scan has coordinates)
     var geoWrap = document.getElementById('scanModalGeoWrap');
     if (d.lat !== null && d.lat !== undefined && d.lng !== null && d.lng !== undefined) {
@@ -2023,6 +2206,14 @@ function openScanModal(d) {
     document.body.style.overflow = 'hidden';
     var closeBtn = document.getElementById('scanModalClose');
     if (closeBtn) closeBtn.focus();
+}
+
+// Resolve button -> inline "Resolve this scan? Cancel / Yes, resolve" (no browser confirm box)
+function scanResolveStep(confirming) {
+    var ask = document.getElementById('scanResolveAsk'), form = document.getElementById('scanResolveForm');
+    if (!ask || !form) return;
+    ask.style.display  = confirming ? 'none' : '';
+    form.style.display = confirming ? 'flex' : 'none';
 }
 
 function closeScanModal() {

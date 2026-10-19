@@ -1073,10 +1073,13 @@ function buildBrgyReportCard(c) {
 
     // Status badge — just the current status, not the full history (e.g. a resolved
     // case shows only "Resolved", not "Verified" + "Resolved").
-    // AI-scanned cases skip the review-pipeline badges entirely since they never need review.
+    // AI-scanned cases skip the "Waiting for Review" step: they show AI Scanned + Verified/Resolved.
     const badgeDefs = [];
     if (isAiScan) {
+        // AI scans are verified by the AI itself (no CASD review); they only move on to Resolved.
         badgeDefs.push({ text: 'AI Scanned', color: '#8b5cf6', bg: 'rgba(139,92,246,0.1)' });
+        if (isResolved) badgeDefs.push({ text: 'Resolved', color: '#16a34a', bg: 'rgba(22,163,74,0.1)' });
+        else            badgeDefs.push({ text: 'Verified', color: '#3b82f6', bg: 'rgba(59,130,246,0.1)' });
     } else {
         if (isPending)       badgeDefs.push({ text: 'Waiting for Review', color: '#f97316', bg: 'rgba(249,115,22,0.1)' });
         else if (isResolved) badgeDefs.push({ text: 'Resolved', color: '#16a34a', bg: 'rgba(22,163,74,0.1)' });
